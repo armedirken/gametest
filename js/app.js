@@ -59,7 +59,7 @@ function fbm(x, y, oct, s) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// WORLD GENERATION
+// WORLD GENERATION — Hyrule Light World (based on LTTP map)
 // ─────────────────────────────────────────────────────────────
 let worldMap  = [];
 let heightMap = [];
@@ -68,55 +68,132 @@ let worldSeed = 0;
 let stars = [];
 const cloudGroups = [];
 
+// Fill a rectangular region with tile type t
+function paintRect(x0, z0, x1, z1, t) {
+  for (let z = z0; z < Math.min(z1, WORLD); z++)
+    for (let x = x0; x < Math.min(x1, WORLD); x++)
+      worldMap[z][x] = t;
+}
+
 function generateMap() {
   worldSeed = Math.random() * 999;
-  worldMap  = [];
 
-  for (let z = 0; z < WORLD; z++) {
-    worldMap[z] = [];
-    for (let x = 0; x < WORLD; x++) {
-      const nx = x / WORLD, nz = z / WORLD;
-      let h = fbm(nx * 4, nz * 4, 7, worldSeed);
-      // island falloff
-      const d = Math.hypot(nx - 0.5, nz - 0.5) * 2.6;
-      h -= d * 0.38;
-      if      (h < 0.07) worldMap[z][x] = T.DEEP;
-      else if (h < 0.21) worldMap[z][x] = T.WATER;
-      else if (h < 0.30) worldMap[z][x] = T.SAND;
-      else if (h < 0.53) worldMap[z][x] = T.GRASS;
-      else if (h < 0.69) worldMap[z][x] = T.FOREST;
-      else               worldMap[z][x] = T.MOUND;
+  // ── Base: fill everything with grass ────────────────────────
+  worldMap = [];
+  for (let z = 0; z < WORLD; z++) worldMap[z] = new Array(WORLD).fill(T.GRASS);
+
+  // ── Biome zones (painted bottom-to-top, later wins) ─────────
+
+  // Ocean border (impassable edges)
+  paintRect(0, 0, WORLD, 2,      T.WATER);
+  paintRect(0, WORLD-2, WORLD, WORLD, T.WATER);
+  paintRect(0, 0, 2, WORLD,     T.WATER);
+  paintRect(WORLD-2, 0, WORLD, WORLD, T.WATER);
+  paintRect(0, 0, WORLD, 1,      T.DEEP);
+  paintRect(0, WORLD-1, WORLD, WORLD, T.DEEP);
+  paintRect(0, 0, 1, WORLD,     T.DEEP);
+  paintRect(WORLD-1, 0, WORLD, WORLD, T.DEEP);
+
+  // ── NORTH ─────────────────────────────────────────────────
+  // Death Mountain (rocky, north center)
+  paintRect(12, 2, 48, 14, T.MOUND);
+  paintRect( 8, 2, 12,  9, T.MOUND);  // extends west
+
+  // Lost Woods / Skull Woods (dense forest, northwest)
+  paintRect(2, 2, 18, 24, T.FOREST);
+  paintRect(2, 24, 8, 40, T.FOREST);  // western forest strip
+
+  // Zora's Domain (water/ice, northeast)
+  paintRect(46, 2, 62, 16, T.WATER);
+
+  // ── CENTER ────────────────────────────────────────────────
+  // Eastern mountains / Eastern Palace area (right side)
+  paintRect(42, 14, 62, 30, T.MOUND);
+  paintRect(44, 16, 60, 28, T.FOREST); // forest inside mountains
+  paintRect(48, 18, 58, 26, T.MOUND);  // rocky core
+
+  // Kakariko Village area (left-center, open grass)
+  paintRect(6, 18, 22, 36, T.GRASS);
+
+  // Southern open Hyrule fields
+  paintRect(8, 34, 54, 48, T.GRASS);
+
+  // ── SOUTH ─────────────────────────────────────────────────
+  // Desert of Mystery (southwest, sandy)
+  paintRect(2, 42, 24, 62, T.SAND);
+  paintRect(2, 38, 14, 42, T.SAND);  // sand creeps north
+
+  // Swamp / marshland (south center-left)
+  paintRect(18, 50, 30, 62, T.WATER);
+
+  // Lake Hylia (large water body, south center-right)
+  paintRect(30, 46, 62, 62, T.WATER);
+  paintRect(34, 48, 60, 62, T.DEEP);
+
+  // Small grass island in Lake Hylia (dungeon site)
+  paintRect(42, 52, 50, 58, T.GRASS);
+
+  // ── HYRULE CASTLE + MOAT ─────────────────────────────────
+  // Moat (water ring around castle, cols 20-42, rows 10-24)
+  paintRect(20, 10, 42, 24, T.WATER);
+
+  // Castle: DWALL perimeter, DFLOOR interior (cols 22-40, rows 12-22)
+  for (let z = 12; z < 22; z++) {
+    for (let x = 22; x < 40; x++) {
+      const wall = z === 12 || z === 21 || x === 22 || x === 39;
+      worldMap[z][x] = wall ? T.DWALL : T.DFLOOR;
     }
   }
+  // South gate (open entrance, center)
+  worldMap[21][30] = T.PATH;
+  worldMap[21][31] = T.PATH;
 
-  carvePaths();
-  placeDungeons();
-
-  // Height map — each tile gets a world-Y surface value
-  heightMap = [];
-  for (let z = 0; z < WORLD; z++) {
-    heightMap[z] = [];
-    for (let x = 0; x < WORLD; x++) {
-      const t  = worldMap[z][x];
-      const n  = fbm(x / 18, z / 18, 4, worldSeed + 50);
-      switch (t) {
-        case T.DEEP:   heightMap[z][x] = -0.5;          break;
-        case T.WATER:  heightMap[z][x] = -0.15;         break;
-        case T.SAND:   heightMap[z][x] =  0.05;         break;
-        case T.GRASS:  heightMap[z][x] =  n * 1.8;      break;
-        case T.FOREST: heightMap[z][x] =  0.4 + n*2.2;  break;
-        case T.MOUND:  heightMap[z][x] =  2.2 + n*3.5;  break;
-        default:       heightMap[z][x] =  0;             break;
+  // ── ZORA'S RIVER ─────────────────────────────────────────
+  // Diagonal water strip: Zora's Domain (col≈54,row≈10) → Lake Hylia (col≈34,row≈48)
+  for (let step = 0; step <= 40; step++) {
+    const rz = 10 + Math.round(step * 38 / 40);
+    const rx = 54 - Math.round(step * 20 / 40);
+    for (let w = 0; w < 2; w++) {
+      const tz = rz, tx = rx + w;
+      if (tz < WORLD && tx >= 0 && tx < WORLD) {
+        const cur = worldMap[tz][tx];
+        if (cur !== T.DWALL && cur !== T.DFLOOR && cur !== T.MOUND)
+          worldMap[tz][tx] = T.WATER;
       }
     }
   }
 
+  // ── PATHS ────────────────────────────────────────────────
+  carvePaths();
+
+  // ── DUNGEONS / PALACES ────────────────────────────────────
+  placeDungeons();
+
+  // ── HEIGHT MAP ───────────────────────────────────────────
+  heightMap = [];
+  for (let z = 0; z < WORLD; z++) {
+    heightMap[z] = [];
+    for (let x = 0; x < WORLD; x++) {
+      const t = worldMap[z][x];
+      const n = fbm(x / 18, z / 18, 4, worldSeed + 50);
+      switch (t) {
+        case T.DEEP:   heightMap[z][x] = -0.5;         break;
+        case T.WATER:  heightMap[z][x] = -0.15;        break;
+        case T.SAND:   heightMap[z][x] =  0.05;        break;
+        case T.GRASS:  heightMap[z][x] =  n * 1.8;     break;
+        case T.FOREST: heightMap[z][x] =  0.4 + n*2.2; break;
+        case T.MOUND:  heightMap[z][x] =  2.2 + n*3.5; break;
+        default:       heightMap[z][x] =  0;            break;
+      }
+    }
+  }
+
+  // ── TREE / ROCK / STAR LISTS ─────────────────────────────
   treeList = []; rockList = []; starList = [];
   const STAR_TILES = new Set([T.GRASS, T.PATH, T.SAND, T.DFLOOR]);
   for (let z = 0; z < WORLD; z++) {
     for (let x = 0; x < WORLD; x++) {
       const t = worldMap[z][x];
-      // More trees: forest + sparse grass trees
       if (t === T.FOREST && hash(x, z, worldSeed+1) > 0.12) treeList.push([x, z]);
       if (t === T.GRASS  && hash(x, z, worldSeed+1) > 0.82) treeList.push([x, z]);
       if ((t === T.MOUND || t === T.GRASS) && hash(x, z, worldSeed+2) > 0.87) rockList.push([x, z]);
@@ -126,35 +203,48 @@ function generateMap() {
 }
 
 function carvePaths() {
-  const cx = WORLD >> 1, cz = WORLD >> 1;
-  const LAND = new Set([T.GRASS, T.FOREST, T.SAND, T.MOUND]);
-  for (const [dx, dz] of [[1,0],[-1,0],[0,1],[0,-1]]) {
-    for (let step = 0; ; step++) {
-      const x = cx + dx * step, z = cz + dz * step;
-      if (x < 0 || x >= WORLD || z < 0 || z >= WORLD) break;
-      if (LAND.has(worldMap[z][x])) worldMap[z][x] = T.PATH;
-    }
+  const SAFE = t => t !== T.DEEP && t !== T.WATER && t !== T.DWALL && t !== T.DFLOOR;
+
+  // N-S main road: from castle south gate down through Hyrule fields
+  for (let z = 22; z < 48; z++) {
+    if (SAFE(worldMap[z][30])) worldMap[z][30] = T.PATH;
+    if (SAFE(worldMap[z][31])) worldMap[z][31] = T.PATH;
+  }
+  // Road north: castle north gate toward Death Mountain
+  for (let z = 2; z < 12; z++) {
+    if (SAFE(worldMap[z][30])) worldMap[z][30] = T.PATH;
+  }
+  // E-W road through central Hyrule
+  for (let x = 6; x < 56; x++) {
+    if (SAFE(worldMap[34][x])) worldMap[34][x] = T.PATH;
+  }
+  // Road to Kakariko Village (west branch, row 26)
+  for (let x = 6; x < 22; x++) {
+    if (SAFE(worldMap[26][x])) worldMap[26][x] = T.PATH;
+  }
+  // Road east toward Eastern Palace (row 26, east side)
+  for (let x = 32; x < 56; x++) {
+    if (SAFE(worldMap[26][x])) worldMap[26][x] = T.PATH;
   }
 }
 
 function placeDungeons() {
-  for (let i = 0; i < 5; i++) {
-    for (let attempt = 0; attempt < 200; attempt++) {
-      const w  = 6 + Math.floor(hash(i, attempt,   worldSeed+3) * 6);
-      const h  = 6 + Math.floor(hash(i, attempt+1, worldSeed+4) * 5);
-      const rx = 3 + Math.floor(hash(i, attempt+2, worldSeed+5) * (WORLD - w - 5));
-      const rz = 3 + Math.floor(hash(i, attempt+3, worldSeed+6) * (WORLD - h - 5));
-      const t  = worldMap[rz]?.[rx];
-      if (t !== T.GRASS && t !== T.FOREST) continue;
-      for (let z = rz; z < rz + h && z < WORLD; z++) {
-        for (let x = rx; x < rx + w && x < WORLD; x++) {
-          const wall = z===rz || z===rz+h-1 || x===rx || x===rx+w-1;
-          worldMap[z][x] = wall ? T.DWALL : T.DFLOOR;
-        }
+  // Fixed palace/dungeon locations — approximate LTTP positions
+  const LOCS = [
+    { x:  4, z:  4, w: 7, h: 6 },  // Skull Woods (NW forest)
+    { x: 46, z: 18, w: 8, h: 7 },  // Eastern Palace (east mountains)
+    { x:  4, z: 48, w: 8, h: 6 },  // Desert Palace (SW desert)
+    { x: 42, z: 53, w: 7, h: 5 },  // Ice Palace (Lake Hylia island)
+    { x: 20, z: 52, w: 7, h: 5 },  // Swamp Palace (south marsh)
+  ];
+  for (const d of LOCS) {
+    for (let z = d.z; z < d.z + d.h && z < WORLD; z++) {
+      for (let x = d.x; x < d.x + d.w && x < WORLD; x++) {
+        const wall = z === d.z || z === d.z + d.h - 1 || x === d.x || x === d.x + d.w - 1;
+        worldMap[z][x] = wall ? T.DWALL : T.DFLOOR;
       }
-      worldMap[rz + h - 1][rx + Math.floor(w / 2)] = T.PATH;
-      break;
     }
+    worldMap[Math.min(d.z + d.h - 1, WORLD-1)][d.x + Math.floor(d.w / 2)] = T.PATH;
   }
 }
 
@@ -994,7 +1084,7 @@ function buildHUD() {
     'pointer-events:none',
   ].join(';');
   el.innerHTML = `
-    <div style="color:#7fff7f;font-size:15px;margin-bottom:3px">&#9876; VR Zelda World</div>
+    <div style="color:#7fff7f;font-size:15px;margin-bottom:3px">&#9876; Hyrule — Light World</div>
     <div>WASD / Arrows &mdash; Move</div>
     <div>Click canvas &mdash; Mouse look &nbsp;|&nbsp; Space &mdash; Attack</div>
     <div>Left stick &mdash; Move (VR) &nbsp;|&nbsp; Swing right &mdash; Slash</div>
