@@ -63,8 +63,9 @@ function fbm(x, y, oct, s) {
 // ─────────────────────────────────────────────────────────────
 let worldMap  = [];
 let heightMap = [];
-let treeList  = [], rockList = [];
+let treeList  = [], rockList = [], starList = [];
 let worldSeed = 0;
+let stars = [];
 const cloudGroups = [];
 
 function generateMap() {
@@ -110,7 +111,8 @@ function generateMap() {
     }
   }
 
-  treeList = []; rockList = [];
+  treeList = []; rockList = []; starList = [];
+  const STAR_TILES = new Set([T.GRASS, T.PATH, T.SAND, T.DFLOOR]);
   for (let z = 0; z < WORLD; z++) {
     for (let x = 0; x < WORLD; x++) {
       const t = worldMap[z][x];
@@ -118,6 +120,7 @@ function generateMap() {
       if (t === T.FOREST && hash(x, z, worldSeed+1) > 0.12) treeList.push([x, z]);
       if (t === T.GRASS  && hash(x, z, worldSeed+1) > 0.82) treeList.push([x, z]);
       if ((t === T.MOUND || t === T.GRASS) && hash(x, z, worldSeed+2) > 0.87) rockList.push([x, z]);
+      if (STAR_TILES.has(t) && hash(x, z, worldSeed+99) > 0.975) starList.push([x, z]);
     }
   }
 }
@@ -288,6 +291,23 @@ function buildScene() {
     });
     rIM.instanceMatrix.needsUpdate = true;
     scene.add(rIM);
+  }
+
+  // ── Stars ────────────────────────────────────────────────────
+  stars = [];
+  if (starList.length) {
+    const starGeo = new THREE.OctahedronGeometry(0.22);
+    const starMat = new THREE.MeshLambertMaterial({
+      color: 0xffdd00, emissive: 0xffaa00, emissiveIntensity: 0.9
+    });
+    for (const [x, z] of starList) {
+      const mesh = new THREE.Mesh(starGeo, starMat);
+      const baseY = heightMap[z][x] + 0.9;
+      mesh.position.set(x * TILE + TILE/2, baseY, z * TILE + TILE/2);
+      mesh.castShadow = true;
+      scene.add(mesh);
+      stars.push({ mesh, collected: false, baseY, phase: hash(x, z, worldSeed+55) * Math.PI * 2 });
+    }
   }
 
   // ── Dungeon torches ──────────────────────────────────────────
@@ -653,6 +673,21 @@ const sfx = {
     src.connect(filter); filter.connect(gain); gain.connect(ctx.destination);
     src.start();
   },
+  starCollect() {
+    const ctx  = getAudioCtx();
+    const notes = [880, 1100, 1320];
+    notes.forEach((freq, i) => {
+      const osc  = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.type = 'sine';
+      const t0 = ctx.currentTime + i * 0.09;
+      osc.frequency.setValueAtTime(freq, t0);
+      gain.gain.setValueAtTime(0.35, t0);
+      gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.25);
+      osc.start(t0); osc.stop(t0 + 0.25);
+    });
+  },
 };
 
 // ── Background music (coloca soundtrack.mp3 en assets/audio/) ─
@@ -700,7 +735,10 @@ function createEnemy(gx, gz) {
   g.position.set(gx * TILE + TILE/2, wy, gz * TILE + TILE/2);
   scene.add(g);
 
-  return { mesh: g, hp: 3, hitCooldown: 0, attackTimer: 0, dead: false, deathT: 0 };
+  return {
+    mesh: g, hp: 3, hitCooldown: 0, attackTimer: 0, dead: false, deathT: 0,
+    spawnX: gx * TILE + TILE/2, spawnZ: gz * TILE + TILE/2, aggroed: false
+  };
 }
 
 function spawnEnemies() {
@@ -736,20 +774,35 @@ function updateEnemies(dt) {
       continue;
     }
 
-    // Chase player
+    // Aggro / retreat logic
     _ep.set(px, e.mesh.position.y, pz);
     const dist = e.mesh.position.distanceTo(_ep);
 
-    if (dist < 14) {
+    if (!e.aggroed && dist < 8)  e.aggroed = true;
+    if (e.aggroed  && dist > 12) e.aggroed = false;
+
+    if (e.aggroed) {
+      // Chase player
       const spd = 2.2 * dt;
       e.mesh.position.x += (px - e.mesh.position.x) / dist * spd;
       e.mesh.position.z += (pz - e.mesh.position.z) / dist * spd;
       e.mesh.position.y = groundAt(e.mesh.position.x, e.mesh.position.z);
       e.mesh.lookAt(px, e.mesh.position.y, pz);
+    } else {
+      // Return to spawn point
+      const dsx = e.spawnX - e.mesh.position.x;
+      const dsz = e.spawnZ - e.mesh.position.z;
+      const dSpawn = Math.sqrt(dsx * dsx + dsz * dsz);
+      if (dSpawn > 0.5) {
+        const spd = 1.5 * dt;
+        e.mesh.position.x += dsx / dSpawn * spd;
+        e.mesh.position.z += dsz / dSpawn * spd;
+        e.mesh.position.y = groundAt(e.mesh.position.x, e.mesh.position.z);
+      }
     }
 
-    // Attack player
-    if (dist < 1.5) {
+    // Attack player (only when aggroed)
+    if (dist < 1.5 && e.aggroed) {
       e.attackTimer += dt;
       if (e.attackTimer >= 1.5) {
         e.attackTimer = 0;
@@ -782,6 +835,88 @@ function updateEnemies(dt) {
       sfx.hit();
       if (e.hp <= 0) { e.dead = true; sfx.death(); }
     }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// GAME OVER / VICTORY / STARS
+// ─────────────────────────────────────────────────────────────
+let gameEnded = false;
+
+function showGameOver() {
+  if (gameEnded) return;
+  gameEnded = true;
+  renderer.setAnimationLoop(null);
+  const el = document.createElement('div');
+  el.style.cssText = [
+    'position:fixed', 'inset:0',
+    'background:rgba(0,0,0,.85)',
+    'display:flex', 'flex-direction:column',
+    'align-items:center', 'justify-content:center',
+    'z-index:200', 'color:#fff', 'font-family:monospace',
+  ].join(';');
+  el.innerHTML = `
+    <div style="font-size:52px;color:#ff4444;margin-bottom:16px;text-shadow:0 0 20px #f00">GAME OVER</div>
+    <div style="font-size:20px;margin-bottom:32px;opacity:.8">Fuiste derrotado...</div>
+    <button onclick="location.reload()"
+      style="font-size:18px;padding:12px 36px;background:#ff4444;color:#fff;
+             border:none;border-radius:8px;cursor:pointer;letter-spacing:1px">
+      ▶ Jugar de nuevo
+    </button>
+  `;
+  document.body.appendChild(el);
+}
+
+function showVictory() {
+  if (gameEnded) return;
+  gameEnded = true;
+  renderer.setAnimationLoop(null);
+  const el = document.createElement('div');
+  el.style.cssText = [
+    'position:fixed', 'inset:0',
+    'background:rgba(0,0,0,.85)',
+    'display:flex', 'flex-direction:column',
+    'align-items:center', 'justify-content:center',
+    'z-index:200', 'color:#fff', 'font-family:monospace',
+  ].join(';');
+  el.innerHTML = `
+    <div style="font-size:52px;color:#ffd700;margin-bottom:16px;text-shadow:0 0 20px #fa0">&#9733; VICTORIA &#9733;</div>
+    <div style="font-size:20px;margin-bottom:8px;opacity:.8">¡Recolectaste todas las estrellas!</div>
+    <div style="font-size:15px;margin-bottom:32px;color:#ffd700;opacity:.7">${stars.length} / ${stars.length} estrellas</div>
+    <button onclick="location.reload()"
+      style="font-size:18px;padding:12px 36px;background:#ffd700;color:#000;
+             border:none;border-radius:8px;cursor:pointer;letter-spacing:1px">
+      ▶ Jugar de nuevo
+    </button>
+  `;
+  document.body.appendChild(el);
+}
+
+let starEl;
+function updateStarCounter() {
+  if (!starEl) return;
+  const collected = stars.filter(s => s.collected).length;
+  starEl.textContent = '\u2605 ' + collected + ' / ' + stars.length;
+}
+
+function checkStarCollection() {
+  if (gameEnded) return;
+  const px = rig.position.x, pz = rig.position.z;
+  let anyNew = false;
+  for (const s of stars) {
+    if (s.collected) continue;
+    const dx = s.mesh.position.x - px;
+    const dz = s.mesh.position.z - pz;
+    if (dx * dx + dz * dz < 1.5 * 1.5) {
+      s.collected = true;
+      scene.remove(s.mesh);
+      sfx.starCollect();
+      anyNew = true;
+    }
+  }
+  if (anyNew) {
+    updateStarCounter();
+    if (stars.length > 0 && stars.every(s => s.collected)) showVictory();
   }
 }
 
@@ -845,6 +980,7 @@ function updateHPBar() {
   if (!hpBarEl) return;
   hpBarEl.textContent = '♥'.repeat(playerHP) + '♡'.repeat(Math.max(0, 5 - playerHP));
   hpBarEl.style.color = playerHP <= 1 ? '#ff4444' : '#ff8888';
+  if (playerHP === 0) showGameOver();
 }
 
 function buildHUD() {
@@ -863,9 +999,11 @@ function buildHUD() {
     <div>Click canvas &mdash; Mouse look &nbsp;|&nbsp; Space &mdash; Attack</div>
     <div>Left stick &mdash; Move (VR) &nbsp;|&nbsp; Swing right &mdash; Slash</div>
     <div id="hp" style="margin-top:6px;font-size:16px;color:#ff8888">♥♥♥♥♥</div>
+    <div id="stars" style="font-size:14px;color:#ffd700;margin-top:3px">&#9733; 0 / 0</div>
   `;
   document.body.appendChild(el);
   hpBarEl = document.getElementById('hp');
+  starEl  = document.getElementById('stars');
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -889,7 +1027,16 @@ renderer.setAnimationLoop(() => {
 
   move(dt);
   updateEnemies(dt);
+  checkStarCollection();
   drawMinimap();
+
+  // Animate uncollected stars (bob + spin)
+  for (const s of stars) {
+    if (!s.collected) {
+      s.mesh.position.y = s.baseY + Math.sin(elapsed * 2.5 + s.phase) * 0.18;
+      s.mesh.rotation.y += dt * 1.8;
+    }
+  }
 
   for (const g of cloudGroups) {
     g.position.x += g.userData.spd * dt;
@@ -908,3 +1055,4 @@ spawnPlayer();
 spawnEnemies();
 buildMinimap();
 buildHUD();
+updateStarCounter();
