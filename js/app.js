@@ -397,20 +397,110 @@ function leftStick() {
 renderer.xr.addEventListener('sessionstart', () => { camera.position.set(0, 0, 0); });
 renderer.xr.addEventListener('sessionend',   () => { camera.position.set(0, EYE, 0); });
 
+// ─────────────────────────────────────────────────────────────
+// WEAPONS
+// ─────────────────────────────────────────────────────────────
+function createSword() {
+  const g = new THREE.Group();
+
+  // Blade
+  const blade = new THREE.Mesh(
+    new THREE.BoxGeometry(0.05, 0.7, 0.008),
+    new THREE.MeshLambertMaterial({ color: 0xd4d4d4 })
+  );
+  blade.position.y = 0.42;
+  g.add(blade);
+
+  // Edge highlight (white stripe along blade)
+  const edge = new THREE.Mesh(
+    new THREE.BoxGeometry(0.01, 0.7, 0.012),
+    new THREE.MeshLambertMaterial({ color: 0xffffff })
+  );
+  edge.position.set(0.02, 0.42, 0);
+  g.add(edge);
+
+  // Guard
+  const guard = new THREE.Mesh(
+    new THREE.BoxGeometry(0.22, 0.05, 0.025),
+    new THREE.MeshLambertMaterial({ color: 0xffd700 })
+  );
+  g.add(guard);
+
+  // Handle
+  const handle = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.019, 0.023, 0.2, 8),
+    new THREE.MeshLambertMaterial({ color: 0x5c2a0e })
+  );
+  handle.position.y = -0.12;
+  g.add(handle);
+
+  // Pommel
+  const pommel = new THREE.Mesh(
+    new THREE.SphereGeometry(0.038, 8, 6),
+    new THREE.MeshLambertMaterial({ color: 0xffd700 })
+  );
+  pommel.position.y = -0.24;
+  g.add(pommel);
+
+  // Rotate so blade points forward (-Z = trigger direction in grip space)
+  g.rotation.x = Math.PI / 2;
+  return g;
+}
+
+function createShield() {
+  const g = new THREE.Group();
+
+  // Body disc (blue)
+  const body = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.24, 0.24, 0.04, 16),
+    new THREE.MeshLambertMaterial({ color: 0x1a237e })
+  );
+  body.rotation.x = Math.PI / 2;
+  g.add(body);
+
+  // Gold rim
+  const rim = new THREE.Mesh(
+    new THREE.TorusGeometry(0.24, 0.022, 8, 20),
+    new THREE.MeshLambertMaterial({ color: 0xffd700 })
+  );
+  g.add(rim);
+
+  // Triforce emblem (3 triangles)
+  const triMat = new THREE.MeshLambertMaterial({
+    color: 0xffc107, emissive: 0xff8800, emissiveIntensity: 0.4
+  });
+  for (const [ox, oy] of [[0, 0.08], [-0.055, -0.015], [0.055, -0.015]]) {
+    const tri = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.02, 3), triMat);
+    tri.rotation.x = -Math.PI / 2; // lay flat facing front of shield
+    tri.position.set(ox, oy, -0.04);
+    g.add(tri);
+  }
+
+  // Slight forward offset so it doesn't clip the controller model
+  g.position.z = -0.05;
+  return g;
+}
+
+// ── Controller setup ─────────────────────────────────────────
 const ctrlFac = new XRControllerModelFactory();
+const sword   = createSword();
+const shield  = createShield();
+
 for (let i = 0; i < 2; i++) {
   const ctrl = renderer.xr.getController(i);
   const grip = renderer.xr.getControllerGrip(i);
   grip.add(ctrlFac.createControllerModel(grip));
-  const ray = new THREE.Line(
-    new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)
-    ]),
-    new THREE.LineBasicMaterial({ color: 0x88ff88 })
-  );
-  ray.scale.z = 3;
-  ctrl.add(ray);
   scene.add(ctrl, grip);
+
+  // Attach weapon based on which hand this controller is
+  ctrl.addEventListener('connected', (ev) => {
+    if (ev.data.handedness === 'right') grip.add(sword);
+    if (ev.data.handedness === 'left')  grip.add(shield);
+  });
+  ctrl.addEventListener('disconnected', () => {
+    grip.remove(sword);
+    grip.remove(shield);
+  });
 }
 
 // ─────────────────────────────────────────────────────────────
