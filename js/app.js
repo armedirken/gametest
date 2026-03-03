@@ -192,9 +192,11 @@ scene.add(sun);
 // ─────────────────────────────────────────────────────────────
 // SCENE BUILDING
 // ─────────────────────────────────────────────────────────────
-const GEO_FLOOR = new THREE.BoxGeometry(TILE, 0.3,  TILE);
-const GEO_WALL  = new THREE.BoxGeometry(TILE, 3.5,  TILE);
-const GEO_MOUND = new THREE.BoxGeometry(TILE, 2.0,  TILE);
+// Tiles are deep pillars so adjacent height differences never show gaps.
+// Top surface sits at heightMap[z][x]; each pillar extends 10 m downward.
+// Wall pillars are 3.5 m above ground + 10.5 m below = 14 m total.
+const GEO_FLOOR = new THREE.BoxGeometry(TILE, 10, TILE);   // center = top - 5
+const GEO_WALL  = new THREE.BoxGeometry(TILE, 14, TILE);   // center = top + 1.75 - 7 = h - 3.5
 const dummy      = new THREE.Object3D();
 
 const TILE_MAT = {
@@ -219,7 +221,7 @@ function buildScene() {
   const imeshes = {}, iidx = {};
   for (const [tStr, n] of Object.entries(count)) {
     const t = +tStr;
-    const geo = t === T.DWALL ? GEO_WALL : t === T.MOUND ? GEO_MOUND : GEO_FLOOR;
+    const geo = t === T.DWALL ? GEO_WALL : GEO_FLOOR;
     const im = new THREE.InstancedMesh(geo, TILE_MAT[t], n);
     im.receiveShadow = true;
     im.castShadow    = (t === T.DWALL || t === T.MOUND);
@@ -231,8 +233,8 @@ function buildScene() {
     for (let x = 0; x < WORLD; x++) {
       const t = worldMap[z][x];
       const h = heightMap[z][x];
-      // Dungeon walls sit on top of their ground height
-      const y = (t === T.DWALL) ? h + 1.75 : h;
+      // Center pillar so top surface = h (floor) or h+3.5 (wall)
+      const y = (t === T.DWALL) ? h - 3.5 : h - 5;
       dummy.position.set(x * TILE + TILE/2, y, z * TILE + TILE/2);
       dummy.rotation.set(0, 0, 0);
       dummy.scale.set(1, 1, 1);
@@ -529,6 +531,7 @@ for (let i = 0; i < 2; i++) {
 // MOVEMENT + COLLISION + TERRAIN
 // ─────────────────────────────────────────────────────────────
 const SOLID = new Set([T.DWALL, T.WATER, T.DEEP]);
+let stepTimer = 0;
 
 function tileAt(wx, wz) {
   const tx = Math.floor(wx / TILE), tz = Math.floor(wz / TILE);
@@ -549,6 +552,8 @@ function move(dt) {
   const [ax, az] = leftStick();
   if (Math.abs(ax) > 0.12) mx += ax;
   if (Math.abs(az) > 0.12) mz += az;
+
+  stepTimer = Math.max(0, stepTimer - dt);
 
   if (mx !== 0 || mz !== 0) {
     let hy = yaw;
@@ -573,12 +578,93 @@ function move(dt) {
       rig.position.x = prevX;
       rig.position.z = prevZ;
     }
+
+    // Footstep sound
+    if (stepTimer === 0) { stepTimer = 0.42; sfx.footstep(); }
   }
 
   // Terrain following — smoothly match ground height
   const targetY = groundAt(rig.position.x, rig.position.z);
   rig.position.y += (targetY - rig.position.y) * Math.min(1, dt * 8);
 }
+
+// ─────────────────────────────────────────────────────────────
+// AUDIO  (SFX sintetizados + música de fondo opcional)
+// ─────────────────────────────────────────────────────────────
+let audioCtx = null;
+function getAudioCtx() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window['webkitAudioContext'])();
+  return audioCtx;
+}
+
+const sfx = {
+  swing() {
+    const ctx = getAudioCtx();
+    const osc  = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(900, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(180, ctx.currentTime + 0.18);
+    gain.gain.setValueAtTime(0.25, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.18);
+    osc.start(); osc.stop(ctx.currentTime + 0.18);
+  },
+  hit() {
+    const ctx  = getAudioCtx();
+    const size = Math.floor(ctx.sampleRate * 0.12);
+    const buf  = ctx.createBuffer(1, size, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < size; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / size);
+    const src    = ctx.createBufferSource();
+    src.buffer   = buf;
+    const filter = ctx.createBiquadFilter();
+    filter.type  = 'lowpass'; filter.frequency.value = 500;
+    const gain   = ctx.createGain();
+    gain.gain.setValueAtTime(0.6, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
+    src.connect(filter); filter.connect(gain); gain.connect(ctx.destination);
+    src.start();
+  },
+  death() {
+    const ctx  = getAudioCtx();
+    const osc  = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(320, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(40, ctx.currentTime + 0.45);
+    gain.gain.setValueAtTime(0.35, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.45);
+    osc.start(); osc.stop(ctx.currentTime + 0.45);
+  },
+  footstep() {
+    const ctx  = getAudioCtx();
+    const size = Math.floor(ctx.sampleRate * 0.04);
+    const buf  = ctx.createBuffer(1, size, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < size; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / size) * 0.4;
+    const src    = ctx.createBufferSource();
+    src.buffer   = buf;
+    const filter = ctx.createBiquadFilter();
+    filter.type  = 'lowpass'; filter.frequency.value = 250;
+    const gain   = ctx.createGain();
+    gain.gain.setValueAtTime(0.3, ctx.currentTime);
+    src.connect(filter); filter.connect(gain); gain.connect(ctx.destination);
+    src.start();
+  },
+};
+
+// ── Background music (coloca soundtrack.mp3 en assets/audio/) ─
+const bgMusic = new Audio('assets/audio/soundtrack.mp3');
+bgMusic.loop   = true;
+bgMusic.volume = 0.35;
+
+// Los navegadores requieren interacción del usuario para reproducir audio
+document.addEventListener('click', () => {
+  getAudioCtx(); // desbloquear contexto
+  if (bgMusic.src && bgMusic.paused) bgMusic.play().catch(() => {});
+}, { once: true });
 
 // ─────────────────────────────────────────────────────────────
 // ENEMIES
@@ -681,10 +767,11 @@ function updateEnemies(dt) {
       if (tipDist < 1.2 && swordVel > 1.5) {
         e.hp--;
         e.hitCooldown = 0.4;
+        sfx.hit();
         // Flash red
         e.mesh.children[0].material = ENEMY_MAT_DMGD;
         setTimeout(() => { if (!e.dead) e.mesh.children[0].material = ENEMY_MAT_BODY; }, 200);
-        if (e.hp <= 0) { e.dead = true; }
+        if (e.hp <= 0) { e.dead = true; sfx.death(); }
       }
     }
 
@@ -692,7 +779,8 @@ function updateEnemies(dt) {
     if (keys['Space'] && dist < 2.5 && e.hitCooldown === 0) {
       e.hp--;
       e.hitCooldown = 0.5;
-      if (e.hp <= 0) { e.dead = true; }
+      sfx.hit();
+      if (e.hp <= 0) { e.dead = true; sfx.death(); }
     }
   }
 }
