@@ -490,7 +490,8 @@ for (let i = 0; i < 2; i++) {
   const ctrl = renderer.xr.getController(i);
   const grip = renderer.xr.getControllerGrip(i);
   grip.add(ctrlFac.createControllerModel(grip));
-  scene.add(ctrl, grip);
+  rig.add(ctrl);
+  rig.add(grip);
 
   // Attach weapon based on which hand this controller is
   ctrl.addEventListener('connected', (ev) => {
