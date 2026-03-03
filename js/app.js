@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
-import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 
 // ─────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -62,8 +61,9 @@ function fbm(x, y, oct, s) {
 // ─────────────────────────────────────────────────────────────
 // WORLD GENERATION
 // ─────────────────────────────────────────────────────────────
-let worldMap = [];
-let treeList = [], rockList = [];
+let worldMap  = [];
+let heightMap = [];
+let treeList  = [], rockList = [];
 let worldSeed = 0;
 const cloudGroups = [];
 
@@ -91,11 +91,32 @@ function generateMap() {
   carvePaths();
   placeDungeons();
 
+  // Height map — each tile gets a world-Y surface value
+  heightMap = [];
+  for (let z = 0; z < WORLD; z++) {
+    heightMap[z] = [];
+    for (let x = 0; x < WORLD; x++) {
+      const t  = worldMap[z][x];
+      const n  = fbm(x / 18, z / 18, 4, worldSeed + 50);
+      switch (t) {
+        case T.DEEP:   heightMap[z][x] = -0.5;          break;
+        case T.WATER:  heightMap[z][x] = -0.15;         break;
+        case T.SAND:   heightMap[z][x] =  0.05;         break;
+        case T.GRASS:  heightMap[z][x] =  n * 1.8;      break;
+        case T.FOREST: heightMap[z][x] =  0.4 + n*2.2;  break;
+        case T.MOUND:  heightMap[z][x] =  2.2 + n*3.5;  break;
+        default:       heightMap[z][x] =  0;             break;
+      }
+    }
+  }
+
   treeList = []; rockList = [];
   for (let z = 0; z < WORLD; z++) {
     for (let x = 0; x < WORLD; x++) {
       const t = worldMap[z][x];
-      if (t === T.FOREST && hash(x, z, worldSeed+1) > 0.28) treeList.push([x, z]);
+      // More trees: forest + sparse grass trees
+      if (t === T.FOREST && hash(x, z, worldSeed+1) > 0.12) treeList.push([x, z]);
+      if (t === T.GRASS  && hash(x, z, worldSeed+1) > 0.82) treeList.push([x, z]);
       if ((t === T.MOUND || t === T.GRASS) && hash(x, z, worldSeed+2) > 0.87) rockList.push([x, z]);
     }
   }
@@ -209,11 +230,9 @@ function buildScene() {
   for (let z = 0; z < WORLD; z++) {
     for (let x = 0; x < WORLD; x++) {
       const t = worldMap[z][x];
-      let y = 0;
-      if (t === T.DEEP)  y = -0.4;
-      if (t === T.WATER) y = -0.15;
-      if (t === T.DWALL) y =  1.75;
-      if (t === T.MOUND) y =  1.0;
+      const h = heightMap[z][x];
+      // Dungeon walls sit on top of their ground height
+      const y = (t === T.DWALL) ? h + 1.75 : h;
       dummy.position.set(x * TILE + TILE/2, y, z * TILE + TILE/2);
       dummy.rotation.set(0, 0, 0);
       dummy.scale.set(1, 1, 1);
@@ -235,12 +254,13 @@ function buildScene() {
 
     treeList.forEach(([x, z], i) => {
       const wx = x * TILE + TILE/2, wz = z * TILE + TILE/2;
-      dummy.position.set(wx, 1.05, wz);
+      const th = heightMap[z][x];
+      dummy.position.set(wx, th + 1.05, wz);
       dummy.rotation.y = hash(x, z, worldSeed+7) * Math.PI * 2;
       dummy.scale.setScalar(1);
       dummy.updateMatrix();
       trunkIM.setMatrixAt(i, dummy.matrix);
-      dummy.position.y = 2.9;
+      dummy.position.y = th + 2.9;
       dummy.updateMatrix();
       leavesIM.setMatrixAt(i, dummy.matrix);
     });
@@ -256,7 +276,7 @@ function buildScene() {
       new THREE.MeshLambertMaterial({ color: COLOR.STONE }), rockList.length);
     rIM.castShadow = true;
     rockList.forEach(([x, z], i) => {
-      dummy.position.set(x*TILE + TILE/2, 0.28, z*TILE + TILE/2);
+      dummy.position.set(x*TILE + TILE/2, heightMap[z][x] + 0.28, z*TILE + TILE/2);
       dummy.rotation.set(
         hash(x, z, worldSeed+8) * Math.PI,
         hash(x, z, worldSeed+9) * Math.PI, 0);
@@ -443,7 +463,7 @@ function createSword() {
   g.add(pommel);
 
   // Rotate so blade points forward (-Z = trigger direction in grip space)
-  g.rotation.x = Math.PI / 2;
+  g.rotation.x = -Math.PI / 2;
   return g;
 }
 
@@ -482,21 +502,22 @@ function createShield() {
 }
 
 // ── Controller setup ─────────────────────────────────────────
-const ctrlFac = new XRControllerModelFactory();
-const sword   = createSword();
-const shield  = createShield();
+const sword  = createSword();
+const shield = createShield();
+
+// gripMeshes[i] holds the right/left grip reference for sword tip world pos
+const gripRefs = {};
 
 for (let i = 0; i < 2; i++) {
   const ctrl = renderer.xr.getController(i);
   const grip = renderer.xr.getControllerGrip(i);
-  grip.add(ctrlFac.createControllerModel(grip));
   rig.add(ctrl);
   rig.add(grip);
 
-  // Attach weapon based on which hand this controller is
   ctrl.addEventListener('connected', (ev) => {
-    if (ev.data.handedness === 'right') grip.add(sword);
-    if (ev.data.handedness === 'left')  grip.add(shield);
+    const hand = ev.data.handedness;
+    if (hand === 'right') { grip.add(sword);  gripRefs.right = grip; }
+    if (hand === 'left')  { grip.add(shield); gripRefs.left  = grip; }
   });
   ctrl.addEventListener('disconnected', () => {
     grip.remove(sword);
@@ -505,8 +526,19 @@ for (let i = 0; i < 2; i++) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// MOVEMENT
+// MOVEMENT + COLLISION + TERRAIN
 // ─────────────────────────────────────────────────────────────
+const SOLID = new Set([T.DWALL, T.WATER, T.DEEP]);
+
+function tileAt(wx, wz) {
+  const tx = Math.floor(wx / TILE), tz = Math.floor(wz / TILE);
+  return worldMap[tz]?.[tx] ?? T.DEEP;
+}
+function groundAt(wx, wz) {
+  const tx = Math.floor(wx / TILE), tz = Math.floor(wz / TILE);
+  return heightMap[tz]?.[tx] ?? 0;
+}
+
 function move(dt) {
   let mx = 0, mz = 0;
   if (keys['KeyW']  || keys['ArrowUp'])    mz = -1;
@@ -518,26 +550,151 @@ function move(dt) {
   if (Math.abs(ax) > 0.12) mx += ax;
   if (Math.abs(az) > 0.12) mz += az;
 
-  if (mx === 0 && mz === 0) return;
+  if (mx !== 0 || mz !== 0) {
+    let hy = yaw;
+    if (renderer.xr.isPresenting) {
+      const q = new THREE.Quaternion();
+      camera.getWorldQuaternion(q);
+      hy = new THREE.Euler().setFromQuaternion(q, 'YXZ').y;
+    }
 
-  // Determine horizontal heading
-  let hy = yaw;
-  if (renderer.xr.isPresenting) {
-    const q = new THREE.Quaternion();
-    camera.getWorldQuaternion(q);
-    hy = new THREE.Euler().setFromQuaternion(q, 'YXZ').y;
+    const dir = new THREE.Vector3(mx, 0, mz)
+      .normalize()
+      .applyEuler(new THREE.Euler(0, hy, 0));
+
+    const prevX = rig.position.x, prevZ = rig.position.z;
+    const maxW  = (WORLD - 1) * TILE;
+
+    rig.position.x = Math.max(1, Math.min(maxW, rig.position.x + dir.x * SPEED * dt));
+    rig.position.z = Math.max(1, Math.min(maxW, rig.position.z + dir.z * SPEED * dt));
+
+    // Wall collision — push back if solid tile
+    if (SOLID.has(tileAt(rig.position.x, rig.position.z))) {
+      rig.position.x = prevX;
+      rig.position.z = prevZ;
+    }
   }
 
-  const dir = new THREE.Vector3(mx, 0, mz)
-    .normalize()
-    .applyEuler(new THREE.Euler(0, hy, 0));
+  // Terrain following — smoothly match ground height
+  const targetY = groundAt(rig.position.x, rig.position.z);
+  rig.position.y += (targetY - rig.position.y) * Math.min(1, dt * 8);
+}
 
-  rig.position.x += dir.x * SPEED * dt;
-  rig.position.z += dir.z * SPEED * dt;
+// ─────────────────────────────────────────────────────────────
+// ENEMIES
+// ─────────────────────────────────────────────────────────────
+let playerHP = 5;
+const enemies = [];
+const swordTipWorld = new THREE.Vector3();
+let   swordPrevPos  = new THREE.Vector3();
+let   swordVel      = 0;
 
-  const maxW = (WORLD - 1) * TILE;
-  rig.position.x = Math.max(1, Math.min(maxW, rig.position.x));
-  rig.position.z = Math.max(1, Math.min(maxW, rig.position.z));
+const ENEMY_MAT_BODY  = new THREE.MeshLambertMaterial({ color: 0x2e7d32 });
+const ENEMY_MAT_DMGD  = new THREE.MeshLambertMaterial({ color: 0xff2222 });
+const ENEMY_MAT_EYE   = new THREE.MeshLambertMaterial({ color: 0xffffff });
+const ENEMY_MAT_PUPIL = new THREE.MeshLambertMaterial({ color: 0x111111 });
+
+function createEnemy(gx, gz) {
+  const g     = new THREE.Group();
+  const body  = new THREE.Mesh(new THREE.SphereGeometry(0.42, 8, 6), ENEMY_MAT_BODY);
+  body.scale.y = 0.65;
+  body.position.y = 0.3;
+  body.castShadow = true;
+  g.add(body);
+
+  for (const sx of [-0.16, 0.16]) {
+    const eye   = new THREE.Mesh(new THREE.SphereGeometry(0.1,  6, 4), ENEMY_MAT_EYE);
+    const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.055,4, 3), ENEMY_MAT_PUPIL);
+    eye.position.set(sx, 0.46, 0.33);
+    pupil.position.set(sx, 0.46, 0.43);
+    g.add(eye, pupil);
+  }
+
+  const wy = heightMap[gz]?.[gx] ?? 0;
+  g.position.set(gx * TILE + TILE/2, wy, gz * TILE + TILE/2);
+  scene.add(g);
+
+  return { mesh: g, hp: 3, hitCooldown: 0, attackTimer: 0, dead: false, deathT: 0 };
+}
+
+function spawnEnemies() {
+  const SPAWN = new Set([T.GRASS, T.FOREST]);
+  for (let z = 2; z < WORLD - 2; z++) {
+    for (let x = 2; x < WORLD - 2; x++) {
+      if (SPAWN.has(worldMap[z][x]) && hash(x, z, worldSeed + 30) > 0.91) {
+        enemies.push(createEnemy(x, z));
+      }
+    }
+  }
+}
+
+const _ep = new THREE.Vector3();
+function updateEnemies(dt) {
+  const px = rig.position.x, pz = rig.position.z;
+
+  // Sword tip world position (blade tip in sword local = (0, 0.77, 0))
+  const hasSword = !!gripRefs.right;
+  if (hasSword) {
+    swordTipWorld.set(0, 0.77, 0);
+    sword.localToWorld(swordTipWorld);
+    swordVel = swordTipWorld.distanceTo(swordPrevPos) / dt;
+    swordPrevPos.copy(swordTipWorld);
+  }
+
+  for (const e of enemies) {
+    if (e.dead) {
+      e.deathT += dt;
+      const s = Math.max(0, 1 - e.deathT / 0.35);
+      e.mesh.scale.setScalar(s);
+      if (e.deathT > 0.4) scene.remove(e.mesh);
+      continue;
+    }
+
+    // Chase player
+    _ep.set(px, e.mesh.position.y, pz);
+    const dist = e.mesh.position.distanceTo(_ep);
+
+    if (dist < 14) {
+      const spd = 2.2 * dt;
+      e.mesh.position.x += (px - e.mesh.position.x) / dist * spd;
+      e.mesh.position.z += (pz - e.mesh.position.z) / dist * spd;
+      e.mesh.position.y = groundAt(e.mesh.position.x, e.mesh.position.z);
+      e.mesh.lookAt(px, e.mesh.position.y, pz);
+    }
+
+    // Attack player
+    if (dist < 1.5) {
+      e.attackTimer += dt;
+      if (e.attackTimer >= 1.5) {
+        e.attackTimer = 0;
+        playerHP = Math.max(0, playerHP - 1);
+        updateHPBar();
+      }
+    } else {
+      e.attackTimer = 0;
+    }
+
+    // Sword hit — tip within 1.2m and sword moving fast enough
+    e.hitCooldown = Math.max(0, e.hitCooldown - dt);
+    if (hasSword && e.hitCooldown === 0) {
+      const tipDist = swordTipWorld.distanceTo(e.mesh.position);
+      if (tipDist < 1.2 && swordVel > 1.5) {
+        e.hp--;
+        e.hitCooldown = 0.4;
+        // Flash red
+        e.mesh.children[0].material = ENEMY_MAT_DMGD;
+        setTimeout(() => { if (!e.dead) e.mesh.children[0].material = ENEMY_MAT_BODY; }, 200);
+        if (e.hp <= 0) { e.dead = true; }
+      }
+    }
+
+    // Space key hit (desktop)
+    if (keys['Space'] && dist < 2.5 && e.hitCooldown === 0) {
+      e.hp--;
+      e.hitCooldown = 0.5;
+      if (e.hp <= 0) { e.dead = true; }
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -594,6 +751,14 @@ function drawMinimap() {
 // ─────────────────────────────────────────────────────────────
 // HUD
 // ─────────────────────────────────────────────────────────────
+let hpBarEl;
+
+function updateHPBar() {
+  if (!hpBarEl) return;
+  hpBarEl.textContent = '♥'.repeat(playerHP) + '♡'.repeat(Math.max(0, 5 - playerHP));
+  hpBarEl.style.color = playerHP <= 1 ? '#ff4444' : '#ff8888';
+}
+
 function buildHUD() {
   const el = document.createElement('div');
   el.style.cssText = [
@@ -607,11 +772,12 @@ function buildHUD() {
   el.innerHTML = `
     <div style="color:#7fff7f;font-size:15px;margin-bottom:3px">&#9876; VR Zelda World</div>
     <div>WASD / Arrows &mdash; Move</div>
-    <div>Click canvas &mdash; Mouse look</div>
-    <div>Left stick &mdash; Move (VR)</div>
-    <div style="margin-top:4px;color:#adf">Explore the island!</div>
+    <div>Click canvas &mdash; Mouse look &nbsp;|&nbsp; Space &mdash; Attack</div>
+    <div>Left stick &mdash; Move (VR) &nbsp;|&nbsp; Swing right &mdash; Slash</div>
+    <div id="hp" style="margin-top:6px;font-size:16px;color:#ff8888">♥♥♥♥♥</div>
   `;
   document.body.appendChild(el);
+  hpBarEl = document.getElementById('hp');
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -634,9 +800,9 @@ renderer.setAnimationLoop(() => {
   elapsed += dt;
 
   move(dt);
+  updateEnemies(dt);
   drawMinimap();
 
-  // Drift clouds
   for (const g of cloudGroups) {
     g.position.x += g.userData.spd * dt;
     if (g.position.x > WORLD * TILE + 20) g.position.x = -20;
@@ -651,5 +817,6 @@ renderer.setAnimationLoop(() => {
 generateMap();
 buildScene();
 spawnPlayer();
+spawnEnemies();
 buildMinimap();
 buildHUD();
