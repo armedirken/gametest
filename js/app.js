@@ -15,21 +15,24 @@ const T = Object.freeze({
   FOREST: 4, MOUND: 5, DFLOOR: 6, DWALL: 7, PATH: 8
 });
 
-// Zelda LTTP-inspired palette
+// Wind Waker–inspired palette (bright, saturated, cheerful)
 const COLOR = {
-  DEEP:   0x0d5a9e,
-  WATER:  0x1e8bc3,
-  SAND:   0xd4b483,
-  GRASS:  0x5da832,
-  FOREST: 0x2d6e1f,
-  MOUND:  0x8b8b8b,
-  DFLOOR: 0x6b4f3a,
-  DWALL:  0x4a3628,
-  PATH:   0xb08060,
-  TRUNK:  0x5c3d1e,
-  LEAF:   0x1a5c0e,
-  STONE:  0x7a7a7a,
-  SKY:    0x89d4f5,
+  DEEP:    0x1a6fb5,   // deep ocean blue
+  WATER:   0x29b6e8,   // bright cartoon water
+  SAND:    0xf5d97a,   // warm sunny sand
+  GRASS:   0x4ecb38,   // vibrant lime-green
+  FOREST:  0x2e9926,   // rich forest green
+  MOUND:   0xa09878,   // warm stone / mountain
+  DFLOOR:  0x8c6a45,   // dungeon stone floor
+  DWALL:   0x5a4030,   // dark dungeon wall
+  PATH:    0xd4a85a,   // golden dirt path
+  TRUNK:   0x6b4220,   // warm brown trunk
+  LEAF:    0x38b824,   // bright leaf green
+  LEAF2:   0x52d93a,   // lighter leaf highlight
+  STONE:   0x9090a0,   // blue-grey stone
+  SKY:     0x5bc8f5,   // Wind Waker sky blue
+  SKY_NIGHT: 0x0a1020, // night sky
+  SKY_DAWN:  0xff9c55, // dawn orange
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -253,33 +256,41 @@ function placeDungeons() {
 // ─────────────────────────────────────────────────────────────
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(COLOR.SKY);
-scene.fog        = new THREE.Fog(COLOR.SKY, 28, 95);
+scene.fog        = new THREE.FogExp2(COLOR.SKY, 0.010);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
+renderer.toneMapping       = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
 renderer.xr.enabled        = true;
 document.body.appendChild(renderer.domElement);
 document.body.appendChild(VRButton.createButton(renderer));
 
 // Camera rig (dolly) — move this for locomotion
 const rig    = new THREE.Group();
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 150);
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 180);
 camera.position.set(0, EYE, 0);
 rig.add(camera);
 scene.add(rig);
 
-// Lighting
-scene.add(new THREE.AmbientLight(0xcce8ff, 0.75));
-const sun = new THREE.DirectionalLight(0xfff4c8, 1.2);
+// Lighting — bright, warm Wind Waker feel
+const ambientLight = new THREE.AmbientLight(0xd0eeff, 1.1);
+scene.add(ambientLight);
+// Fill light (soft blue from opposite side)
+const fillLight = new THREE.DirectionalLight(0xaaddff, 0.4);
+fillLight.position.set(-40, 30, -60);
+scene.add(fillLight);
+// Sun (main directional)
+const sun = new THREE.DirectionalLight(0xfff2cc, 1.6);
 sun.position.set(60, 90, 40);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
 const sc = sun.shadow.camera;
-sc.near = 0.5; sc.far = 200;
-sc.left = sc.bottom = -100; sc.right = sc.top = 100;
+sc.near = 0.5; sc.far = 220;
+sc.left = sc.bottom = -120; sc.right = sc.top = 120;
 scene.add(sun);
 
 // ─────────────────────────────────────────────────────────────
@@ -337,31 +348,53 @@ function buildScene() {
   }
   for (const im of Object.values(imeshes)) im.instanceMatrix.needsUpdate = true;
 
-  // ── Trees ────────────────────────────────────────────────────
+  // ── Trees — round, bushy LTTP/Wind-Waker style ───────────────
   if (treeList.length) {
-    const trunkIM  = new THREE.InstancedMesh(
-      new THREE.CylinderGeometry(0.22, 0.32, 1.8, 7),
+    const trunkIM   = new THREE.InstancedMesh(
+      new THREE.CylinderGeometry(0.18, 0.28, 2.2, 7),
       new THREE.MeshLambertMaterial({ color: COLOR.TRUNK }), treeList.length);
-    const leavesIM = new THREE.InstancedMesh(
-      new THREE.ConeGeometry(1.15, 2.8, 7),
+    // Two sphere layers for a fuller canopy
+    const leaves1IM = new THREE.InstancedMesh(
+      new THREE.SphereGeometry(1.35, 8, 7),
       new THREE.MeshLambertMaterial({ color: COLOR.LEAF  }), treeList.length);
-    trunkIM.castShadow = leavesIM.castShadow = true;
+    const leaves2IM = new THREE.InstancedMesh(
+      new THREE.SphereGeometry(0.95, 7, 6),
+      new THREE.MeshLambertMaterial({ color: COLOR.LEAF2 }), treeList.length);
+    trunkIM.castShadow = leaves1IM.castShadow = leaves2IM.castShadow = true;
 
     treeList.forEach(([x, z], i) => {
       const wx = x * TILE + TILE/2, wz = z * TILE + TILE/2;
       const th = heightMap[z][x];
-      dummy.position.set(wx, th + 1.05, wz);
-      dummy.rotation.y = hash(x, z, worldSeed+7) * Math.PI * 2;
-      dummy.scale.setScalar(1);
+      const sc = 0.85 + hash(x, z, worldSeed+77) * 0.5; // size variety
+      const ry = hash(x, z, worldSeed+7) * Math.PI * 2;
+
+      // Trunk
+      dummy.position.set(wx, th + 1.1 * sc, wz);
+      dummy.rotation.set(0, ry, 0);
+      dummy.scale.setScalar(sc);
       dummy.updateMatrix();
       trunkIM.setMatrixAt(i, dummy.matrix);
-      dummy.position.y = th + 2.9;
+
+      // Main canopy (centered slightly above trunk top)
+      dummy.position.set(wx, th + 2.9 * sc, wz);
+      dummy.scale.setScalar(sc);
       dummy.updateMatrix();
-      leavesIM.setMatrixAt(i, dummy.matrix);
+      leaves1IM.setMatrixAt(i, dummy.matrix);
+
+      // Top highlight sphere (slightly offset for roundness)
+      dummy.position.set(
+        wx + (hash(x, z, worldSeed+78) - 0.5) * 0.6 * sc,
+        th + 3.8 * sc,
+        wz + (hash(x, z, worldSeed+79) - 0.5) * 0.6 * sc
+      );
+      dummy.scale.setScalar(sc * 0.75);
+      dummy.updateMatrix();
+      leaves2IM.setMatrixAt(i, dummy.matrix);
     });
     trunkIM.instanceMatrix.needsUpdate  = true;
-    leavesIM.instanceMatrix.needsUpdate = true;
-    scene.add(trunkIM, leavesIM);
+    leaves1IM.instanceMatrix.needsUpdate = true;
+    leaves2IM.instanceMatrix.needsUpdate = true;
+    scene.add(trunkIM, leaves1IM, leaves2IM);
   }
 
   // ── Rocks ────────────────────────────────────────────────────
@@ -1011,6 +1044,130 @@ function checkStarCollection() {
 }
 
 // ─────────────────────────────────────────────────────────────
+// DAY / NIGHT CYCLE  (full day = 10 real minutes)
+// ─────────────────────────────────────────────────────────────
+let dayTime = 0.35; // start mid-morning (0=midnight, 0.5=noon, 1=midnight again)
+const DAY_SPEED = 1 / 600; // 600 seconds per full cycle
+
+const _skyDay   = new THREE.Color(COLOR.SKY);
+const _skyDawn  = new THREE.Color(COLOR.SKY_DAWN);
+const _skyNight = new THREE.Color(COLOR.SKY_NIGHT);
+const _sunColor = new THREE.Color();
+
+function updateDayNight(dt) {
+  dayTime = (dayTime + DAY_SPEED * dt) % 1;
+
+  // t01: 0 at dawn(0.25)/dusk(0.75), 1 at noon(0.5)
+  const angle  = dayTime * Math.PI * 2; // full circle
+  const sinT   = Math.sin(angle);       // +1 at noon, -1 at midnight
+
+  // Sky color: blend night→dawn→day→dusk→night
+  let skyCol;
+  if (dayTime < 0.25) {
+    // midnight → dawn
+    skyCol = _skyNight.clone().lerp(_skyDawn, dayTime / 0.25);
+  } else if (dayTime < 0.35) {
+    // dawn → day
+    skyCol = _skyDawn.clone().lerp(_skyDay, (dayTime - 0.25) / 0.10);
+  } else if (dayTime < 0.65) {
+    // day (full brightness)
+    skyCol = _skyDay.clone();
+  } else if (dayTime < 0.75) {
+    // day → dusk
+    skyCol = _skyDay.clone().lerp(_skyDawn, (dayTime - 0.65) / 0.10);
+  } else {
+    // dusk → night
+    skyCol = _skyDawn.clone().lerp(_skyNight, (dayTime - 0.75) / 0.25);
+  }
+  scene.background = skyCol;
+  scene.fog.color.copy(skyCol);
+
+  // Sun brightness: bright at noon, dark at night
+  const brightness = Math.max(0, sinT); // 0 at night, 1 at noon
+  sun.intensity = brightness * 1.8;
+  ambientLight.intensity = 0.3 + brightness * 0.9;
+
+  // Sun position circles overhead
+  const sunDist = 100;
+  sun.position.set(
+    Math.cos(angle) * sunDist,
+    Math.sin(angle) * sunDist,
+    40
+  );
+
+  // Sun color: warm white at day, orange-red at dusk/dawn
+  const duskAmount = 1 - Math.min(1, brightness * 3);
+  _sunColor.setHex(0xfff2cc).lerp(new THREE.Color(0xff6600), duskAmount * 0.6);
+  sun.color.copy(_sunColor);
+
+  // Update rain chance on day boundary
+  if (isRaining && brightness < 0.01) stopRain();
+}
+
+// ─────────────────────────────────────────────────────────────
+// RAIN SYSTEM
+// ─────────────────────────────────────────────────────────────
+let isRaining = false;
+let rainMesh = null;
+let rainTimer = 30 + Math.random() * 60; // first rain in 30-90s
+
+const RAIN_COUNT = 1800;
+const rainPositions = new Float32Array(RAIN_COUNT * 3);
+const rainVelocities = new Float32Array(RAIN_COUNT);
+
+function startRain() {
+  if (isRaining) return;
+  isRaining = true;
+  const geo = new THREE.BufferGeometry();
+  for (let i = 0; i < RAIN_COUNT; i++) {
+    rainPositions[i*3]   = (Math.random() - 0.5) * 80;
+    rainPositions[i*3+1] = Math.random() * 30;
+    rainPositions[i*3+2] = (Math.random() - 0.5) * 80;
+    rainVelocities[i] = 8 + Math.random() * 6;
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(rainPositions, 3));
+  const mat = new THREE.PointsMaterial({
+    color: 0xaaddff, size: 0.08, transparent: true, opacity: 0.55
+  });
+  rainMesh = new THREE.Points(geo, mat);
+  scene.add(rainMesh);
+  ambientLight.intensity *= 0.65;
+}
+
+function stopRain() {
+  if (!isRaining || !rainMesh) return;
+  scene.remove(rainMesh);
+  rainMesh.geometry.dispose();
+  rainMesh = null;
+  isRaining = false;
+}
+
+function updateRain(dt) {
+  rainTimer -= dt;
+  if (rainTimer <= 0) {
+    if (!isRaining) {
+      startRain();
+      rainTimer = 20 + Math.random() * 40; // rain lasts 20-60s
+    } else {
+      stopRain();
+      rainTimer = 60 + Math.random() * 120; // dry period 60-180s
+    }
+  }
+  if (!isRaining || !rainMesh) return;
+  const pos = rainMesh.geometry.attributes.position;
+  const cx = rig.position.x, cz = rig.position.z;
+  for (let i = 0; i < RAIN_COUNT; i++) {
+    pos.array[i*3+1] -= rainVelocities[i] * dt;
+    if (pos.array[i*3+1] < -2) {
+      pos.array[i*3]   = cx + (Math.random() - 0.5) * 80;
+      pos.array[i*3+1] = 25 + Math.random() * 10;
+      pos.array[i*3+2] = cz + (Math.random() - 0.5) * 80;
+    }
+  }
+  pos.needsUpdate = true;
+}
+
+// ─────────────────────────────────────────────────────────────
 // MINIMAP
 // ─────────────────────────────────────────────────────────────
 const mmBuf = document.createElement('canvas');
@@ -1118,6 +1275,8 @@ renderer.setAnimationLoop(() => {
   move(dt);
   updateEnemies(dt);
   checkStarCollection();
+  updateDayNight(dt);
+  updateRain(dt);
   drawMinimap();
 
   // Animate uncollected stars (bob + spin)
