@@ -1997,64 +1997,132 @@ function spawnRockTowers() {
 // ─────────────────────────────────────────────────────────────
 // DRAGONS — dragones que despegan de torres y disparan fuego
 // ─────────────────────────────────────────────────────────────
-const _DMAT_BODY = new THREE.MeshLambertMaterial({ color: 0x7a1010 });
-const _DMAT_WING = new THREE.MeshLambertMaterial({ color: 0xa01818, side: THREE.DoubleSide });
-const _DMAT_EYE  = new THREE.MeshLambertMaterial({ color: 0xffee00, emissive: 0xff8800, emissiveIntensity: 1.0 });
-const _FIRE_MAT  = new THREE.MeshLambertMaterial({ color: 0xff6600, emissive: 0xff2200, emissiveIntensity: 1.2 });
-const _FIRE_GEO  = new THREE.SphereGeometry(0.22, 6, 4);
+const _DMAT_BODY  = new THREE.MeshLambertMaterial({ color: 0x6b0f0f });
+const _DMAT_BELLY = new THREE.MeshLambertMaterial({ color: 0xcc3a0a });
+const _DMAT_WING  = new THREE.MeshLambertMaterial({ color: 0x7a1515, side: THREE.DoubleSide });
+const _DMAT_EYE   = new THREE.MeshLambertMaterial({ color: 0xffee00, emissive: 0xff8800, emissiveIntensity: 1.2 });
+const _DMAT_DARK  = new THREE.MeshLambertMaterial({ color: 0x2e0505 });
+const _FIRE_MAT   = new THREE.MeshLambertMaterial({ color: 0xff6600, emissive: 0xff2200, emissiveIntensity: 1.2 });
+const _FIRE_GEO   = new THREE.SphereGeometry(0.22, 6, 4);
 
 function _createDragonMesh() {
   const g = new THREE.Group();
 
-  // Cuerpo alargado
-  const body = new THREE.Mesh(new THREE.SphereGeometry(0.42, 8, 6), _DMAT_BODY);
-  body.scale.set(1, 0.65, 2.0);
+  // ── Cuerpo ────────────────────────────────────────────────
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.42, 10, 7), _DMAT_BODY);
+  body.scale.set(0.9, 0.68, 1.9);
   g.add(body);
 
-  // Cabeza
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.28, 7, 5), _DMAT_BODY);
-  head.position.set(0, 0.12, 0.9);
+  // Vientre más claro (naranja-rojo)
+  const belly = new THREE.Mesh(new THREE.SphereGeometry(0.36, 8, 5), _DMAT_BELLY);
+  belly.scale.set(0.58, 0.28, 1.6);
+  belly.position.set(0, -0.22, 0.05);
+  g.add(belly);
+
+  // ── Cuello ────────────────────────────────────────────────
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.25, 0.52, 7), _DMAT_BODY);
+  neck.rotation.x = -0.58;
+  neck.position.set(0, 0.21, 0.68);
+  g.add(neck);
+
+  // ── Cabeza ────────────────────────────────────────────────
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.27, 8, 6), _DMAT_BODY);
+  head.scale.set(0.88, 0.76, 1.12);
+  head.position.set(0, 0.36, 1.0);
   g.add(head);
 
-  // Hocico (origen del fuego)
-  const snout = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.12, 0.22, 5), _DMAT_BODY);
+  // Hocico
+  const snout = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.13, 0.3, 6), _DMAT_BODY);
   snout.rotation.x = Math.PI / 2;
-  snout.position.set(0, 0.05, 1.18);
+  snout.position.set(0, 0.24, 1.3);
   g.add(snout);
 
-  // Ojos brillantes
-  for (const sx of [-0.14, 0.14]) {
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.07, 5, 4), _DMAT_EYE);
-    eye.position.set(sx, 0.22, 0.97);
-    g.add(eye);
+  // Fosas nasales
+  for (const sx of [-0.05, 0.05]) {
+    const n = new THREE.Mesh(new THREE.SphereGeometry(0.024, 4, 3), _DMAT_DARK);
+    n.position.set(sx, 0.255, 1.47);
+    g.add(n);
   }
 
-  // Alas (PlaneGeometry doble cara)
-  const wingGeo = new THREE.PlaneGeometry(1.9, 0.85, 2, 1);
-  const lWing = new THREE.Mesh(wingGeo, _DMAT_WING);
-  lWing.position.set(1.05, 0.18, -0.1);
-  lWing.rotation.set(0.12, 0, Math.PI / 7);
-  g.add(lWing);
-
-  const rWing = new THREE.Mesh(wingGeo, _DMAT_WING);
-  rWing.position.set(-1.05, 0.18, -0.1);
-  rWing.rotation.set(0.12, 0, -Math.PI / 7);
-  g.add(rWing);
-
-  // Cola
-  const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.17, 1.0, 5), _DMAT_BODY);
-  tail.rotation.x = Math.PI / 2;
-  tail.position.set(0, -0.08, -0.95);
-  g.add(tail);
+  // Ojos + pupilas
+  for (const sx of [-0.155, 0.155]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.072, 6, 5), _DMAT_EYE);
+    eye.position.set(sx, 0.43, 1.01);
+    g.add(eye);
+    const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.04, 4, 3), _DMAT_DARK);
+    pupil.position.set(sx * 1.01, 0.43, 1.07);
+    g.add(pupil);
+  }
 
   // Cuernos
-  for (const sx of [-0.12, 0.12]) {
-    const horn = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.22, 4), _DMAT_BODY);
-    horn.position.set(sx, 0.38, 0.78);
+  for (const [sx, rz] of [[-0.14, -0.22], [0.14, 0.22]]) {
+    const horn = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.3, 4), _DMAT_DARK);
+    horn.position.set(sx, 0.6, 0.88);
+    horn.rotation.set(0.2, 0, rz);
     g.add(horn);
   }
 
-  g.scale.setScalar(1.5);
+  // ── Púas en la espalda ─────────────────────────────────────
+  [[0, 0.33, 0.54], [0, 0.32, 0.2], [0, 0.30,-0.16],
+   [0, 0.27,-0.52], [0, 0.22,-0.85]].forEach(([x, y, z], i) => {
+    const sp = new THREE.Mesh(
+      new THREE.ConeGeometry(0.05, 0.22 - i * 0.018, 4), _DMAT_DARK);
+    sp.position.set(x, y, z);
+    g.add(sp);
+  });
+
+  // ── Alas de murciélago (BufferGeometry en abanico) ─────────
+  function makeWingGeo() {
+    const p = new Float32Array([
+       0.0,  0.0,  0.18,   // 0 raíz frontal
+       0.0,  0.0, -0.55,   // 1 raíz trasera
+       1.75, 0.62,-1.05,   // 2 punta superior
+       2.85, 0.08,  0.1,   // 3 punta primaria
+       2.05,-0.28,  1.0,   // 4 punta inferior
+       0.5, -0.12,  0.88,  // 5 raíz inferior
+    ]);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(p, 3));
+    geo.setIndex([0,2,1, 0,3,2, 0,4,3, 0,5,4]);
+    geo.computeVertexNormals();
+    return geo;
+  }
+  const wGeo = makeWingGeo();
+
+  const lWing = new THREE.Mesh(wGeo, _DMAT_WING);
+  lWing.position.set(0.38, 0.08, -0.08);
+  g.add(lWing);
+
+  const rWing = new THREE.Mesh(wGeo, _DMAT_WING);
+  rWing.position.set(-0.38, 0.08, -0.08);
+  rWing.scale.x = -1; // espejo del ala izquierda
+  g.add(rWing);
+
+  // ── Cola ──────────────────────────────────────────────────
+  const tail = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.04, 0.19, 1.1, 6), _DMAT_BODY);
+  tail.rotation.x = Math.PI / 2;
+  tail.position.set(0, -0.1, -1.04);
+  g.add(tail);
+
+  // Punta de cola (rombo)
+  const tip = new THREE.Mesh(
+    new THREE.ConeGeometry(0.1, 0.28, 4), _DMAT_DARK);
+  tip.rotation.x = -Math.PI / 2;
+  tip.position.set(0, -0.1, -1.7);
+  g.add(tip);
+
+  // ── Patas (4, pequeñas) ───────────────────────────────────
+  [[-0.27, 0.39, -0.16], [0.27, 0.39, -0.16],
+   [-0.23,-0.3,   0.18], [0.23,-0.3,   0.18]].forEach(([sx, sz, rx]) => {
+    const leg = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.042, 0.032, 0.34, 5), _DMAT_BODY);
+    leg.position.set(sx, -0.30, sz);
+    leg.rotation.set(rx, 0, sx > 0 ? 0.25 : -0.25);
+    g.add(leg);
+  });
+
+  g.scale.setScalar(1.8);
   return { group: g, lWing, rWing };
 }
 
@@ -2083,11 +2151,12 @@ function updateDragons(dt) {
     const distRoost = Math.sqrt(rx * rx + rz * rz);
 
     // Aleteo — más rápido y amplio en vuelo
-    const flapSpd = d.state === 'perched' ? 1.8 : 7.5;
-    const flapAmt = d.state === 'perched' ? 0.08 : 0.52;
-    const flapVal = Math.sin(elapsed * flapSpd + d.orbitAngle);
-    d.lWing.rotation.z =  Math.PI / 7 + flapVal * flapAmt;
-    d.rWing.rotation.z = -Math.PI / 7 - flapVal * flapAmt;
+    const flapSpd = d.state === 'perched' ? 1.6 : 7.0;
+    const flapAmt = d.state === 'perched' ? 0.06 : 0.5;
+    const flapVal = Math.sin(elapsed * flapSpd + d.orbitAngle) * flapAmt;
+    // Ala izq sube cuando flapVal>0; ala der está en espejo (scale.x=-1) → se invierte
+    d.lWing.rotation.z =  flapVal;
+    d.rWing.rotation.z = -flapVal;
 
     if (d.state === 'perched') {
       d.mesh.position.set(d.roost.x,
