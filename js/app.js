@@ -2012,91 +2012,80 @@ function spawnRockTowers() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// DRAGONS — dragones que despegan de torres y disparan fuego
+// AVE FÉNIX — despega de torres y dispara bolas de fuego
 // ─────────────────────────────────────────────────────────────
-const _DMAT_BODY  = new THREE.MeshLambertMaterial({ color: 0x6b0f0f });
-const _DMAT_BELLY = new THREE.MeshLambertMaterial({ color: 0xcc3a0a });
-const _DMAT_WING  = new THREE.MeshLambertMaterial({ color: 0x7a1515, side: THREE.DoubleSide });
-const _DMAT_EYE   = new THREE.MeshLambertMaterial({ color: 0xffee00, emissive: 0xff8800, emissiveIntensity: 1.2 });
-const _DMAT_DARK  = new THREE.MeshLambertMaterial({ color: 0x2e0505 });
+const _BMAT_BODY  = new THREE.MeshLambertMaterial({ color: 0xcc3300 });
+const _BMAT_BELLY = new THREE.MeshLambertMaterial({ color: 0xff8800 });
+const _BMAT_HEAD  = new THREE.MeshLambertMaterial({ color: 0xdd2200 });
+const _BMAT_WING  = new THREE.MeshLambertMaterial({ color: 0xff4400, side: THREE.DoubleSide });
+const _BMAT_BEAK  = new THREE.MeshLambertMaterial({ color: 0xffcc00 });
+const _BMAT_EYE   = new THREE.MeshLambertMaterial({ color: 0xffffaa, emissive: 0xff8800, emissiveIntensity: 1.5 });
+const _BMAT_CREST = new THREE.MeshLambertMaterial({ color: 0xff2200 });
+const _BMAT_TAIL  = new THREE.MeshLambertMaterial({ color: 0xff5500, side: THREE.DoubleSide });
 const _FIRE_MAT   = new THREE.MeshLambertMaterial({ color: 0xff6600, emissive: 0xff2200, emissiveIntensity: 1.2 });
 const _FIRE_GEO   = new THREE.SphereGeometry(0.22, 6, 4);
 
-function _createDragonMesh() {
+function _createBirdMesh() {
   const g = new THREE.Group();
 
-  // ── Cuerpo ────────────────────────────────────────────────
-  const body = new THREE.Mesh(new THREE.SphereGeometry(0.42, 10, 7), _DMAT_BODY);
-  body.scale.set(0.9, 0.68, 1.9);
+  // ── Cuerpo — huevo alargado ───────────────────────────────
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.38, 9, 6), _BMAT_BODY);
+  body.scale.set(0.82, 0.70, 1.75);
   g.add(body);
 
-  // Vientre más claro (naranja-rojo)
-  const belly = new THREE.Mesh(new THREE.SphereGeometry(0.36, 8, 5), _DMAT_BELLY);
-  belly.scale.set(0.58, 0.28, 1.6);
-  belly.position.set(0, -0.22, 0.05);
-  g.add(belly);
+  // Pecho — amarillo-naranja más claro
+  const breast = new THREE.Mesh(new THREE.SphereGeometry(0.30, 7, 5), _BMAT_BELLY);
+  breast.scale.set(0.70, 0.55, 1.4);
+  breast.position.set(0, -0.12, 0.1);
+  g.add(breast);
 
-  // ── Cuello ────────────────────────────────────────────────
-  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.25, 0.52, 7), _DMAT_BODY);
-  neck.rotation.x = -0.58;
-  neck.position.set(0, 0.21, 0.68);
+  // ── Cuello corto ─────────────────────────────────────────
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.18, 0.32, 6), _BMAT_BODY);
+  neck.rotation.x = -0.50;
+  neck.position.set(0, 0.17, 0.56);
   g.add(neck);
 
-  // ── Cabeza ────────────────────────────────────────────────
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.27, 8, 6), _DMAT_BODY);
-  head.scale.set(0.88, 0.76, 1.12);
-  head.position.set(0, 0.36, 1.0);
+  // ── Cabeza redonda ────────────────────────────────────────
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 8, 6), _BMAT_HEAD);
+  head.position.set(0, 0.29, 0.76);
   g.add(head);
 
-  // Hocico
-  const snout = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.13, 0.3, 6), _DMAT_BODY);
-  snout.rotation.x = Math.PI / 2;
-  snout.position.set(0, 0.24, 1.3);
-  g.add(snout);
-
-  // Fosas nasales
-  for (const sx of [-0.05, 0.05]) {
-    const n = new THREE.Mesh(new THREE.SphereGeometry(0.024, 4, 3), _DMAT_DARK);
-    n.position.set(sx, 0.255, 1.47);
-    g.add(n);
-  }
-
-  // Ojos + pupilas
-  for (const sx of [-0.155, 0.155]) {
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.072, 6, 5), _DMAT_EYE);
-    eye.position.set(sx, 0.43, 1.01);
-    g.add(eye);
-    const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.04, 4, 3), _DMAT_DARK);
-    pupil.position.set(sx * 1.01, 0.43, 1.07);
-    g.add(pupil);
-  }
-
-  // Cuernos
-  for (const [sx, rz] of [[-0.14, -0.22], [0.14, 0.22]]) {
-    const horn = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.3, 4), _DMAT_DARK);
-    horn.position.set(sx, 0.6, 0.88);
-    horn.rotation.set(0.2, 0, rz);
-    g.add(horn);
-  }
-
-  // ── Púas en la espalda ─────────────────────────────────────
-  [[0, 0.33, 0.54], [0, 0.32, 0.2], [0, 0.30,-0.16],
-   [0, 0.27,-0.52], [0, 0.22,-0.85]].forEach(([x, y, z], i) => {
-    const sp = new THREE.Mesh(
-      new THREE.ConeGeometry(0.05, 0.22 - i * 0.018, 4), _DMAT_DARK);
-    sp.position.set(x, y, z);
-    g.add(sp);
+  // Plumas de cresta (3 conos en la cima de la cabeza)
+  [[-0.07, 0, -0.06], [0, 0.05, 0], [0.07, 0, -0.06]].forEach(([ox, oy, rz]) => {
+    const c = new THREE.Mesh(new THREE.ConeGeometry(0.028, 0.17, 4), _BMAT_CREST);
+    c.position.set(ox, 0.52 + oy, 0.73);
+    c.rotation.set(-0.25, 0, rz);
+    g.add(c);
   });
 
-  // ── Alas de murciélago (BufferGeometry en abanico) ─────────
-  function makeWingGeo() {
+  // ── Pico superior (apunta en +Z) ─────────────────────────
+  const beakU = new THREE.Mesh(new THREE.ConeGeometry(0.042, 0.20, 5), _BMAT_BEAK);
+  beakU.rotation.x = Math.PI / 2;
+  beakU.position.set(0, 0.31, 1.00);
+  g.add(beakU);
+
+  // Pico inferior (más pequeño, ligeramente hacia abajo)
+  const beakL = new THREE.Mesh(new THREE.ConeGeometry(0.028, 0.13, 4), _BMAT_BEAK);
+  beakL.rotation.x = Math.PI / 2 + 0.28;
+  beakL.position.set(0, 0.22, 0.98);
+  g.add(beakL);
+
+  // Ojos brillantes
+  for (const sx of [-0.155, 0.155]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.055, 6, 4), _BMAT_EYE);
+    eye.position.set(sx, 0.34, 0.84);
+    g.add(eye);
+  }
+
+  // ── Alas de ave (BufferGeometry barrida horizontalmente) ──
+  function makeBirdWingGeo() {
     const p = new Float32Array([
-       0.0,  0.0,  0.18,   // 0 raíz frontal
-       0.0,  0.0, -0.55,   // 1 raíz trasera
-       1.75, 0.62,-1.05,   // 2 punta superior
-       2.85, 0.08,  0.1,   // 3 punta primaria
-       2.05,-0.28,  1.0,   // 4 punta inferior
-       0.5, -0.12,  0.88,  // 5 raíz inferior
+       0.0,  0.0,  0.22,  // 0 raíz delantera
+       0.0,  0.0, -0.20,  // 1 raíz trasera
+       1.95, 0.26,-0.90,  // 2 codo / punta trasera
+       2.75, 0.10,  0.0,  // 3 punta primaria
+       1.85,-0.08,  0.48, // 4 punta inferior
+       0.35,-0.08,  0.32, // 5 raíz inferior
     ]);
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(p, 3));
@@ -2104,52 +2093,39 @@ function _createDragonMesh() {
     geo.computeVertexNormals();
     return geo;
   }
-  const wGeo = makeWingGeo();
+  const wGeo = makeBirdWingGeo();
 
-  const lWing = new THREE.Mesh(wGeo, _DMAT_WING);
-  lWing.position.set(0.38, 0.08, -0.08);
+  const lWing = new THREE.Mesh(wGeo, _BMAT_WING);
+  lWing.position.set(0.32, 0.06, 0.0);
   g.add(lWing);
 
-  const rWing = new THREE.Mesh(wGeo, _DMAT_WING);
-  rWing.position.set(-0.38, 0.08, -0.08);
-  rWing.scale.x = -1; // espejo del ala izquierda
+  const rWing = new THREE.Mesh(wGeo, _BMAT_WING);
+  rWing.position.set(-0.32, 0.06, 0.0);
+  rWing.scale.x = -1; // espejo
   g.add(rWing);
 
-  // ── Cola ──────────────────────────────────────────────────
-  const tail = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.04, 0.19, 1.1, 6), _DMAT_BODY);
-  tail.rotation.x = Math.PI / 2;
-  tail.position.set(0, -0.1, -1.04);
-  g.add(tail);
-
-  // Punta de cola (rombo)
-  const tip = new THREE.Mesh(
-    new THREE.ConeGeometry(0.1, 0.28, 4), _DMAT_DARK);
-  tip.rotation.x = -Math.PI / 2;
-  tip.position.set(0, -0.1, -1.7);
-  g.add(tip);
-
-  // ── Patas (4, pequeñas) ───────────────────────────────────
-  [[-0.27, 0.39, -0.16], [0.27, 0.39, -0.16],
-   [-0.23,-0.3,   0.18], [0.23,-0.3,   0.18]].forEach(([sx, sz, rx]) => {
-    const leg = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.042, 0.032, 0.34, 5), _DMAT_BODY);
-    leg.position.set(sx, -0.30, sz);
-    leg.rotation.set(rx, 0, sx > 0 ? 0.25 : -0.25);
-    g.add(leg);
+  // ── Cola en abanico (3 plumas planas) ─────────────────────
+  [[-0.30, 0], [0, 0], [0.30, 0]].forEach(([rz, ry]) => {
+    const feather = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.85), _BMAT_TAIL);
+    feather.rotation.set(Math.PI / 2, ry, rz);
+    feather.position.set(0, -0.06, -0.98);
+    g.add(feather);
   });
 
-  g.scale.setScalar(1.8);
-  return { group: g, lWing, rWing };
+  g.scale.setScalar(1.5);
+  // Punta del pico en espacio local (pre-escala) — para origen del disparo
+  const beakTip = new THREE.Vector3(0, 0.31, 1.11);
+  return { group: g, lWing, rWing, beakTip };
 }
 
 function spawnDragons() {
   for (const roost of dragonRoosts) {
-    const { group, lWing, rWing } = _createDragonMesh();
+    const { group, lWing, rWing, beakTip } = _createBirdMesh();
+    group.rotation.order = 'YXZ';
     group.position.set(roost.x, roost.topY + 0.6, roost.z);
     scene.add(group);
     dragons.push({
-      mesh: group, lWing, rWing, roost,
+      mesh: group, lWing, rWing, beakTip, roost,
       state: 'perched',       // perched | takeoff | circling | returning | landing
       stateT: 0,
       orbitAngle: Math.random() * Math.PI * 2,
@@ -2198,19 +2174,26 @@ function updateDragons(dt) {
       d.mesh.position.x += (tX - d.mesh.position.x) * Math.min(1, dt * 4.5);
       d.mesh.position.y += (tY - d.mesh.position.y) * Math.min(1, dt * 3.0);
       d.mesh.position.z += (tZ - d.mesh.position.z) * Math.min(1, dt * 4.5);
-      // Cara en la dirección de órbita (tangente)
-      d.mesh.rotation.y = d.orbitAngle + Math.PI / 2;
+      // El ave mira hacia el jugador
+      d.mesh.rotation.y = Math.atan2(
+        px - d.mesh.position.x,
+        pz - d.mesh.position.z
+      );
+      // Leve inclinación hacia abajo al mirar al jugador (pitch)
+      const dy = playerWorldY - d.mesh.position.y;
+      const dh = Math.sqrt(
+        (px - d.mesh.position.x) ** 2 + (pz - d.mesh.position.z) ** 2
+      ) || 1;
+      d.mesh.rotation.x = -Math.atan2(dy, dh) * 0.5;
 
       // Disparo
       d.shootCooldown -= dt;
       if (d.shootCooldown <= 0) {
         d.shootCooldown = 2.0 + Math.random() * 1.5;
         const fMesh = new THREE.Mesh(_FIRE_GEO, _FIRE_MAT);
-        fMesh.position.set(
-          d.mesh.position.x + Math.cos(d.orbitAngle) * 1.2,
-          d.mesh.position.y - 0.1,
-          d.mesh.position.z + Math.sin(d.orbitAngle) * 1.2
-        );
+        // Origen del disparo desde la punta del pico en espacio mundo
+        const beakWorld = d.mesh.localToWorld(d.beakTip.clone());
+        fMesh.position.copy(beakWorld);
         scene.add(fMesh);
         const fdx = px - fMesh.position.x;
         const fdy = playerWorldY - fMesh.position.y;
