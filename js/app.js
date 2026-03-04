@@ -355,7 +355,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type    = THREE.PCFShadowMap; // PCFSoft demasiado costoso en móvil
 renderer.toneMapping       = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
 renderer.xr.enabled        = true;
@@ -380,7 +380,7 @@ scene.add(fillLight);
 const sun = new THREE.DirectionalLight(0xfff2cc, 1.6);
 sun.position.set(60, 90, 40);
 sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.mapSize.set(1024, 1024); // 2048 demasiado pesado en Quest 2
 const sc = sun.shadow.camera;
 sc.near = 0.5; sc.far = 220;
 sc.left = sc.bottom = -120; sc.right = sc.top = 120;
@@ -799,8 +799,23 @@ function rightStick() {
 
 const TURN_SPEED = 1.6; // rad/s for smooth VR turning
 
-renderer.xr.addEventListener('sessionstart', () => { camera.position.set(0, 0, 0); });
-renderer.xr.addEventListener('sessionend',   () => { camera.position.set(0, EYE, 0); });
+renderer.xr.addEventListener('sessionstart', () => {
+  camera.position.set(0, 0, 0);
+  // ── Optimizaciones Quest 2 ─────────────────────────────────
+  renderer.shadowMap.enabled      = false;          // mayor ganancia
+  renderer.toneMapping            = THREE.LinearToneMapping;
+  renderer.toneMappingExposure    = 1.0;
+  renderer.setPixelRatio(1);                        // evita resolución doble
+  if (isRaining) stopRain();
+  rainTimer = 999999;                               // sin lluvia en VR (costosa)
+});
+renderer.xr.addEventListener('sessionend', () => {
+  camera.position.set(0, EYE, 0);
+  renderer.shadowMap.enabled      = true;
+  renderer.toneMapping            = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure    = 1.1;
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+});
 
 // ─────────────────────────────────────────────────────────────
 // WEAPONS
@@ -1901,8 +1916,10 @@ renderer.setAnimationLoop(() => {
     updateDayNight(dt);
     updateRain(dt);
   }
-  updateWater(elapsed);
-  drawMinimap();
+  // En VR saltar animación de agua (costosa — actualiza todos los vértices)
+  if (!renderer.xr.isPresenting) updateWater(elapsed);
+  // Minimapa: en VR actualizar cada 6 frames, en desktop cada frame
+  if (!renderer.xr.isPresenting || Math.round(elapsed * 10) % 6 === 0) drawMinimap();
 
   // Animate coins (bob + spin)
   for (const s of stars) {
