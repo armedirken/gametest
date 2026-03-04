@@ -1,5 +1,7 @@
 import * as THREE from 'three';
-import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { VRButton }    from 'three/addons/webxr/VRButton.js';
+import { GLTFLoader }      from 'three/addons/loaders/GLTFLoader.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 // ─────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -70,7 +72,11 @@ let treeList  = [], rockList = [], starList = [];
 let worldSeed = 0;
 let stars = [];
 const cloudGroups = [];
-const pushRocks = [];
+const pushRocks    = [];
+const wallRockData = []; // { imRef, idx, pos, knocked } — lazy physics activation
+let rockGeo = null, rockMat = null; // set after GLB load
+let treeLists = [[], [], []];             // [forestList, fieldList, mountainList]
+const treePartsList = [null, null, null]; // [{geo,mat}[]] per model — preserves multi-material
 
 // Fill a rectangular region with tile type t
 function paintRect(x0, z0, x1, z1, t) {
@@ -194,12 +200,31 @@ function generateMap() {
 
   // ── TREE / ROCK / STAR LISTS ─────────────────────────────
   treeList = []; rockList = []; starList = [];
+  treeLists = [[], [], []];
   const STAR_TILES = new Set([T.GRASS, T.PATH, T.SAND, T.DFLOOR]);
   for (let z = 0; z < WORLD; z++) {
     for (let x = 0; x < WORLD; x++) {
       const t = worldMap[z][x];
-      if (t === T.FOREST && hash(x, z, worldSeed+1) > 0.12) treeList.push([x, z]);
-      if (t === T.GRASS  && hash(x, z, worldSeed+1) > 0.82) treeList.push([x, z]);
+
+      // Tree 0 — dense canopy (Lost Woods, eastern forest, western strip)
+      if (t === T.FOREST && hash(x, z, worldSeed+1) > 0.12)
+        treeLists[0].push([x, z]);
+
+      // Tree 1 — field / riverside (grass shores + open Hyrule fields)
+      if (t === T.GRASS) {
+        const nearWater = [[z-1,x],[z+1,x],[z,x-1],[z,x+1]].some(
+          ([nz,nx]) => nz>=0&&nz<WORLD&&nx>=0&&nx<WORLD &&
+                       (worldMap[nz][nx]===T.WATER||worldMap[nz][nx]===T.DEEP));
+        if (hash(x, z, worldSeed+11) > (nearWater ? 0.68 : 0.88))
+          treeLists[1].push([x, z]);
+      }
+
+      // Tree 0 also covers mountain zones (tree_1 on highlands)
+      if (t === T.MOUND && hash(x, z, worldSeed+21) > 0.70)
+        treeLists[0].push([x, z]);
+      if (t === T.FOREST && (z < 14 || x > 40) && hash(x, z, worldSeed+22) > 0.55)
+        treeLists[0].push([x, z]);
+
       if ((t === T.MOUND || t === T.GRASS) && hash(x, z, worldSeed+2) > 0.87) rockList.push([x, z]);
       if (STAR_TILES.has(t) && hash(x, z, worldSeed+99) > 0.975) starList.push([x, z]);
     }
@@ -394,93 +419,172 @@ function buildScene() {
     scene.add(foamIM);
   }
 
-  // ── DWALL — stacked stone blocks ─────────────────────────────
+  // ── DWALL — GLB rock stacks ───────────────────────────────────
   const dwalls = [];
   for (let z = 0; z < WORLD; z++)
     for (let x = 0; x < WORLD; x++)
       if (worldMap[z][x] === T.DWALL) dwalls.push([x, z]);
-  if (dwalls.length) {
-    const LAYERS = 5;
-    const SH = 0.70;                       // height per stone layer
-    const SW = TILE * 0.90;               // stone width/depth
-    // Two interleaved materials for visual depth
-    const matA = new THREE.MeshLambertMaterial({ color: 0x8a8a7a }); // warm light gray
-    const matB = new THREE.MeshLambertMaterial({ color: 0x686860 }); // cool dark gray
-    const geoS = new THREE.BoxGeometry(SW, SH, SW);
-    const imA  = new THREE.InstancedMesh(geoS, matA, dwalls.length * 3); // layers 0,2,4
-    const imB  = new THREE.InstancedMesh(geoS, matB, dwalls.length * 2); // layers 1,3
-    imA.castShadow = imA.receiveShadow = true;
-    imB.castShadow = imB.receiveShadow = true;
-    let iA = 0, iB = 0;
+  if (dwalls.length && rockGeo) {
+    const WLAYERS = 5;                     // layers per wall tile
+    const ROCKS_PER_ROW = 3;               // rocks side-by-side per layer
+    // Geo after reshape: XZ = 0.85*0.80 = 0.68 m, Y = 0.85*1.20 = 1.02 m
+    const ROCK_XZ = 0.68, ROCK_Y = 1.02;
+    // Scale so 3 rocks exactly fill tile width, height stays proportional
+    const WSCALE  = TILE / (ROCKS_PER_ROW * ROCK_XZ); // ≈ 1.47
+    const LAYER_H = ROCK_Y * WSCALE;                  // ≈ 1.50 m per layer
 
-    dwalls.forEach(([x, z]) => {
+    // Classify each tile: corner (neighbours in both X and Z) vs straight
+    const dwallSet = new Set(dwalls.map(([x, z]) => `${x},${z}`));
+    const CORNER_ROCKS    = 4;            // 2×2 grid per corner layer
+    const CORNER_SCALE_XZ = TILE / (2 * ROCK_XZ); // ≈ 2.21 → 2 rocks fill tile
+
+    const tileTypes = dwalls.map(([x, z]) => {
+      const inX = dwallSet.has(`${x-1},${z}`) || dwallSet.has(`${x+1},${z}`);
+      const inZ = dwallSet.has(`${x},${z-1}`) || dwallSet.has(`${x},${z+1}`);
+      return (inX && inZ) ? 'corner' : (inZ ? 'z' : 'x');
+    });
+
+    const totalInst = dwalls.reduce((sum, _, i) =>
+      sum + WLAYERS * (tileTypes[i] === 'corner' ? CORNER_ROCKS : ROCKS_PER_ROW), 0);
+    const wallIM = new THREE.InstancedMesh(rockGeo, rockMat, totalInst);
+    wallIM.castShadow = wallIM.receiveShadow = true;
+    let wi = 0;
+
+    dwalls.forEach(([x, z], ti) => {
       const cx = x * TILE + TILE / 2, cz = z * TILE + TILE / 2;
-      for (let ly = 0; ly < LAYERS; ly++) {
-        // Alternating brick offset + small random jitter
-        const offX = (ly & 1 ?  0.11 : -0.11) + (hash(x,   z + ly, worldSeed + 60) - 0.5) * 0.13;
-        const offZ = (ly & 1 ? -0.11 :  0.11) + (hash(z,   x + ly, worldSeed + 61) - 0.5) * 0.13;
-        const ry   = (hash(x * 3 + ly, z, worldSeed + 62) - 0.5) * 0.24; // small Y rotation
-        dummy.position.set(cx + offX, SH * (ly + 0.5), cz + offZ);
-        dummy.rotation.set(0, ry, 0);
-        dummy.scale.set(1, 1, 1);
-        dummy.updateMatrix();
-        if (ly & 1) imB.setMatrixAt(iB++, dummy.matrix);
-        else        imA.setMatrixAt(iA++, dummy.matrix);
+      const type   = tileTypes[ti];
+      const count  = type === 'corner' ? CORNER_ROCKS : ROCKS_PER_ROW;
+      const alongZ = type === 'z';
+
+      for (let ly = 0; ly < WLAYERS; ly++) {
+        const brickOff = (ly & 1) ? TILE / 6 : 0;
+        for (let ri = 0; ri < count; ri++) {
+          let px, pz;
+          if (type === 'corner') {
+            // 2×2 grid fills the corner in both axes
+            px = cx + (ri % 2       - 0.5) * (TILE / 2);
+            pz = cz + (Math.floor(ri / 2) - 0.5) * (TILE / 2);
+          } else {
+            const step = (ri - 1) * (TILE / 3) + brickOff;
+            px = cx + (alongZ ? 0    : step);
+            pz = cz + (alongZ ? step : 0);
+          }
+          px += (hash(x + ri * 5, z + ly,       worldSeed + 60) - 0.5) * 0.05;
+          pz += (hash(x,          z + ri + ly*3, worldSeed + 61) - 0.5) * 0.05;
+          const py = LAYER_H * ly;
+          dummy.position.set(px, py, pz);
+          dummy.rotation.set(0, 0, 0);
+          if (type === 'corner') dummy.scale.set(CORNER_SCALE_XZ, WSCALE, CORNER_SCALE_XZ);
+          else                   dummy.scale.setScalar(WSCALE);
+          dummy.updateMatrix();
+          wallIM.setMatrixAt(wi, dummy.matrix);
+          wallRockData.push({ imRef: wallIM, idx: wi,
+            pos: new THREE.Vector3(px, py, pz), knocked: false });
+          wi++;
+        }
       }
     });
-    imA.instanceMatrix.needsUpdate = true;
-    imB.instanceMatrix.needsUpdate = true;
-    scene.add(imA, imB);
+    wallIM.instanceMatrix.needsUpdate = true;
+    scene.add(wallIM);
+
+    // ── Battlements — merlons on top of each wall ───────────────
+    // Pattern: even wall-tiles get 2 merlons (positions 0 & 2), odd get 1 (center)
+    // Corners get 1 centered merlon
+    const MERLON_BOTTOM   = LAYER_H * WLAYERS; // just above last layer top
+    const MERLON_SCALE_XZ = WSCALE;                    // same width as wall rocks
+    const MERLON_SCALE_Y  = WSCALE * 1.4;              // 40 % taller than wall rocks
+
+    const merlonCount = dwalls.reduce((sum, [x, z], i) => {
+      if (tileTypes[i] === 'corner') return sum + 1;
+      const coord = tileTypes[i] === 'z' ? z : x;
+      return sum + (coord % 2 === 0 ? 2 : 1);
+    }, 0);
+
+    if (merlonCount > 0) {
+      const merIM = new THREE.InstancedMesh(rockGeo, rockMat, merlonCount);
+      merIM.castShadow = true;
+      let mi = 0;
+
+      dwalls.forEach(([x, z], ti) => {
+        const cx = x * TILE + TILE / 2, cz = z * TILE + TILE / 2;
+        const type   = tileTypes[ti];
+        const alongZ = type === 'z';
+
+        const placeM = (px, pz) => {
+          dummy.position.set(px, MERLON_BOTTOM, pz);
+          dummy.rotation.set(0, 0, 0);
+          dummy.scale.set(MERLON_SCALE_XZ, MERLON_SCALE_Y, MERLON_SCALE_XZ);
+          dummy.updateMatrix();
+          merIM.setMatrixAt(mi++, dummy.matrix);
+        };
+
+        if (type === 'corner') {
+          placeM(cx, cz);
+        } else {
+          const coord   = alongZ ? z : x;
+          const offsets = coord % 2 === 0 ? [-1, 1] : [0];
+          for (const off of offsets) {
+            const step = off * (TILE / 3);
+            placeM(cx + (alongZ ? 0 : step), cz + (alongZ ? step : 0));
+          }
+        }
+      });
+      merIM.instanceMatrix.needsUpdate = true;
+      scene.add(merIM);
+    }
   }
 
-  // ── Trees — round, bushy LTTP/Wind-Waker style ───────────────
-  if (treeList.length) {
-    const trunkIM   = new THREE.InstancedMesh(
-      new THREE.CylinderGeometry(0.18, 0.28, 2.2, 7),
-      new THREE.MeshLambertMaterial({ color: COLOR.TRUNK }), treeList.length);
-    // Two sphere layers for a fuller canopy
-    const leaves1IM = new THREE.InstancedMesh(
-      new THREE.SphereGeometry(1.35, 8, 7),
-      new THREE.MeshLambertMaterial({ color: COLOR.LEAF  }), treeList.length);
-    const leaves2IM = new THREE.InstancedMesh(
-      new THREE.SphereGeometry(0.95, 7, 6),
-      new THREE.MeshLambertMaterial({ color: COLOR.LEAF2 }), treeList.length);
-    trunkIM.castShadow = leaves1IM.castShadow = leaves2IM.castShadow = true;
+  // ── DFLOOR — flat GLB rock slabs (same geo as walls) ─────────
+  if (rockGeo) {
+    const dfloors = [];
+    for (let z = 0; z < WORLD; z++)
+      for (let x = 0; x < WORLD; x++)
+        if (worldMap[z][x] === T.DFLOOR) dfloors.push([x, z]);
+    if (dfloors.length) {
+      // Geo XZ = 0.68 m — scale to fill TILE; very flat in Y
+      const FSCALE_XZ = (TILE * 0.97) / 0.68; // ≈ 4.28
+      const floorIM = new THREE.InstancedMesh(rockGeo, rockMat, dfloors.length);
+      floorIM.receiveShadow = true;
+      dfloors.forEach(([x, z], i) => {
+        const thick = 0.14 + hash(x, z, worldSeed + 44) * 0.07; // slab thickness variety
+        // Rotate 0°/90°/180°/270° to break up repetition
+        const ry = Math.round(hash(x, z, worldSeed + 45) * 3) * (Math.PI / 2);
+        dummy.position.set(x * TILE + TILE / 2, 0, z * TILE + TILE / 2);
+        dummy.rotation.set(0, ry, 0);
+        dummy.scale.set(FSCALE_XZ, thick, FSCALE_XZ);
+        dummy.updateMatrix();
+        floorIM.setMatrixAt(i, dummy.matrix);
+      });
+      floorIM.instanceMatrix.needsUpdate = true;
+      scene.add(floorIM);
+    }
+  }
 
-    treeList.forEach(([x, z], i) => {
-      const wx = x * TILE + TILE/2, wz = z * TILE + TILE/2;
-      const th = heightMap[z][x];
-      const sc = 0.85 + hash(x, z, worldSeed+77) * 0.5; // size variety
-      const ry = hash(x, z, worldSeed+7) * Math.PI * 2;
+  // ── Trees — 3 GLB models placed by biome ────────────────────
+  const TREE_BASE = [2.5, 1.8, 2.5]; // min size
+  const TREE_VARY = [5.0, 4.5, 5.0]; // +random → wide range small→large
 
-      // Trunk
-      dummy.position.set(wx, th + 1.1 * sc, wz);
-      dummy.rotation.set(0, ry, 0);
-      dummy.scale.setScalar(sc);
-      dummy.updateMatrix();
-      trunkIM.setMatrixAt(i, dummy.matrix);
-
-      // Main canopy (centered slightly above trunk top)
-      dummy.position.set(wx, th + 2.9 * sc, wz);
-      dummy.scale.setScalar(sc);
-      dummy.updateMatrix();
-      leaves1IM.setMatrixAt(i, dummy.matrix);
-
-      // Top highlight sphere (slightly offset for roundness)
-      dummy.position.set(
-        wx + (hash(x, z, worldSeed+78) - 0.5) * 0.6 * sc,
-        th + 3.8 * sc,
-        wz + (hash(x, z, worldSeed+79) - 0.5) * 0.6 * sc
-      );
-      dummy.scale.setScalar(sc * 0.75);
-      dummy.updateMatrix();
-      leaves2IM.setMatrixAt(i, dummy.matrix);
+  treeLists.forEach((list, mi) => {
+    const parts = treePartsList[mi];
+    if (!list.length || !parts?.length) return;
+    // One InstancedMesh per GLB mesh-part so each part keeps its original material
+    parts.forEach(({ geo, mat }) => {
+      const im = new THREE.InstancedMesh(geo, mat, list.length);
+      im.castShadow = im.receiveShadow = true;
+      list.forEach(([x, z], i) => {
+        const wx = x * TILE + TILE / 2, wz = z * TILE + TILE / 2;
+        const sc = TREE_BASE[mi] + hash(x, z, worldSeed + 77 + mi * 13) * TREE_VARY[mi];
+        const ry = hash(x, z, worldSeed + 7  + mi * 17) * Math.PI * 2;
+        dummy.position.set(wx, groundAt(wx, wz) - sc * 0.06, wz); // bury roots slightly
+        dummy.rotation.set(0, ry, 0);
+        dummy.scale.setScalar(sc);
+        dummy.updateMatrix();
+        im.setMatrixAt(i, dummy.matrix);
+      });
+      im.instanceMatrix.needsUpdate = true;
+      scene.add(im);
     });
-    trunkIM.instanceMatrix.needsUpdate  = true;
-    leaves1IM.instanceMatrix.needsUpdate = true;
-    leaves2IM.instanceMatrix.needsUpdate = true;
-    scene.add(trunkIM, leaves1IM, leaves2IM);
-  }
+  });
 
   // ── Rocks ────────────────────────────────────────────────────
   if (rockList.length) {
@@ -1186,19 +1290,36 @@ function updateEnemies(dt) {
 // ─────────────────────────────────────────────────────────────
 // PUSH ROCKS — large boulders with simple physics
 // ─────────────────────────────────────────────────────────────
-const ROCK_HALF = 0.45;  // half the box side (box = 0.9 m)
-const ROCK_R    = 0.62;  // collision radius
+const ROCK_HALF = 0.34;  // half the reshaped XZ (0.85 × 0.80 = 0.68 m)
+const ROCK_R    = 0.50;  // collision radius
+
+function knockWallRock(wr, impulseX, impulseZ) {
+  if (wr.knocked) return;
+  wr.knocked = true;
+  // Hide the instanced rock by zeroing its scale
+  const zero = new THREE.Object3D();
+  zero.scale.set(0, 0, 0);
+  zero.updateMatrix();
+  wr.imRef.setMatrixAt(wr.idx, zero.matrix);
+  wr.imRef.instanceMatrix.needsUpdate = true;
+  // Spawn a physics mesh at the same position
+  const mesh = new THREE.Mesh(rockGeo, rockMat);
+  mesh.castShadow = true;
+  mesh.position.copy(wr.pos);
+  scene.add(mesh);
+  pushRocks.push({ mesh, vx: impulseX, vz: impulseZ, hitCooldown: 0.35 });
+}
 
 function spawnPushRocks() {
+  if (!rockGeo) return;
   const VALID = new Set([T.GRASS, T.MOUND, T.SAND]);
-  const geo = new THREE.BoxGeometry(ROCK_HALF * 2, ROCK_HALF * 2, ROCK_HALF * 2);
-  const mat = new THREE.MeshLambertMaterial({ color: 0x7a7060 });
   for (let z = 2; z < WORLD - 2; z++) {
     for (let x = 2; x < WORLD - 2; x++) {
       if (VALID.has(worldMap[z][x]) && hash(x, z, worldSeed + 88) > 0.988) {
         const wx = x * TILE + TILE / 2, wz = z * TILE + TILE / 2;
-        const mesh = new THREE.Mesh(geo, mat);
+        const mesh = new THREE.Mesh(rockGeo, rockMat);
         mesh.castShadow = mesh.receiveShadow = true;
+        mesh.rotation.y = hash(x, z, worldSeed + 33) * Math.PI * 2;
         mesh.position.set(wx, groundAt(wx, wz) + ROCK_HALF, wz);
         scene.add(mesh);
         pushRocks.push({ mesh, vx: 0, vz: 0, hitCooldown: 0 });
@@ -1208,8 +1329,25 @@ function spawnPushRocks() {
 }
 
 function updatePushRocks(dt) {
-  if (!pushRocks.length) return;
   const hasSword = !!gripRefs.right;
+
+  // ── Wall rock hit detection ─────────────────────────────────
+  if (hasSword && swordVel > 2 && wallRockData.length) {
+    for (const wr of wallRockData) {
+      if (wr.knocked) continue;
+      const dx = wr.pos.x - swordTipWorld.x;
+      const dz = wr.pos.z - swordTipWorld.z;
+      if (dx * dx + dz * dz < 1.8 * 1.8) {
+        const d = Math.sqrt(dx * dx + dz * dz) || 0.01;
+        const impulse = Math.min(swordVel * 0.25, 7);
+        knockWallRock(wr, dx / d * impulse, dz / d * impulse);
+        sfx.hit();
+        break; // one per frame
+      }
+    }
+  }
+
+  if (!pushRocks.length) return;
 
   for (const r of pushRocks) {
     r.hitCooldown = Math.max(0, r.hitCooldown - dt);
@@ -1684,6 +1822,7 @@ const clock = new THREE.Clock();
 let elapsed = 0;
 
 renderer.setAnimationLoop(() => {
+  if (!worldMap.length) return; // wait for GLB load + initGame
   const dt = Math.min(clock.getDelta(), 0.05);
   elapsed += dt;
 
@@ -1717,11 +1856,148 @@ renderer.setAnimationLoop(() => {
 // ─────────────────────────────────────────────────────────────
 // INIT
 // ─────────────────────────────────────────────────────────────
-generateMap();
-buildScene();
-spawnPlayer();
-spawnEnemies();
-spawnPushRocks();
-buildMinimap();
-buildHUD();
-updateStarCounter();
+function initGame() {
+  generateMap();
+  buildScene();
+  spawnPlayer();
+  spawnEnemies();
+  spawnPushRocks();
+  buildMinimap();
+  buildHUD();
+  updateStarCounter();
+}
+
+// ── Asset loading — all 4 GLBs in parallel, start when done ──
+let _assetsLeft = 3; // rock + tree_1 + tree_2
+function _onAsset() { if (--_assetsLeft === 0) initGame(); }
+
+// Normalize a geometry to unit size with bottom at y = 0
+function _normGeo(gltf, { cubeReshape = false } = {}) {
+  const geos = [];
+  gltf.scene.traverse(child => {
+    if (child.isMesh) {
+      // Local space only — no matrixWorld so export rotations are not baked in
+      geos.push(child.geometry.clone());
+    }
+  });
+  if (!geos.length) return null;
+  let geo;
+  try { geo = geos.length === 1 ? geos[0] : mergeGeometries(geos); }
+  catch { geo = geos[0]; }
+  if (!geo) return null;
+  geo.computeBoundingBox();
+  const c = new THREE.Vector3();
+  geo.boundingBox.getCenter(c);
+  geo.translate(-c.x, -c.y, -c.z);
+  geo.computeBoundingBox();
+  const sz = new THREE.Vector3();
+  geo.boundingBox.getSize(sz);
+
+  // Trees only: auto-correct if model is lying on its side (Y is not tallest axis)
+  if (!cubeReshape) {
+    if (sz.z > sz.y + 0.05) {
+      // Trunk along Z → rotate -90° around X to stand upright
+      geo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
+      geo.computeBoundingBox();
+      geo.boundingBox.getSize(sz);
+    } else if (sz.x > sz.y + 0.05) {
+      // Trunk along X → rotate 90° around Z
+      geo.applyMatrix4(new THREE.Matrix4().makeRotationZ(Math.PI / 2));
+      geo.computeBoundingBox();
+      geo.boundingBox.getSize(sz);
+    }
+  }
+
+  if (cubeReshape) {
+    // Rock: force each axis to 0.85 m then narrow XZ / stretch Y
+    geo.scale(0.85 / sz.x, 0.85 / sz.y, 0.85 / sz.z);
+    geo.scale(0.80, 1.20, 0.80);
+  } else {
+    // Tree: uniform scale → 1 m unit cube
+    const s = 1.0 / Math.max(sz.x, sz.y, sz.z);
+    geo.scale(s, s, s);
+  }
+  geo.computeBoundingBox();
+  geo.translate(0, -geo.boundingBox.min.y, 0);
+  return geo;
+}
+
+const _loader = new GLTFLoader();
+
+// Rock
+_loader.load('assets/models/low_poly_rock.glb', gltf => {
+  rockGeo = _normGeo(gltf, { cubeReshape: true }) ?? new THREE.BoxGeometry(0.85, 0.85, 0.85);
+  rockMat = new THREE.MeshLambertMaterial({ color: 0x9a8870 });
+  _onAsset();
+}, undefined, () => {
+  rockGeo = new THREE.BoxGeometry(0.85, 0.85, 0.85);
+  rockMat = new THREE.MeshLambertMaterial({ color: 0x9a8870 });
+  _onAsset();
+});
+
+// Fix material for non-PBR lighting: if MeshStandardMaterial, clone and zero metalness
+// so diffuse color/texture/vertex-colors render correctly under ambient+directional lights.
+function _fixMat(mat) {
+  if (!mat.isMeshStandardMaterial) return mat;
+  const m = mat.clone();
+  m.metalness = 0;
+  m.roughness  = 0.8;
+  return m;
+}
+
+// Trees — preserve all per-mesh materials by keeping parts separate (no mergeGeometries)
+function _normTreeParts(gltf) {
+  const sceneInv = new THREE.Matrix4().copy(gltf.scene.matrixWorld).invert();
+  const parts = [];
+  gltf.scene.traverse(child => {
+    if (!child.isMesh) return;
+    const geo = child.geometry.clone();
+    // Put geometry in scene-root space (strips root export rotation, keeps relative positions)
+    geo.applyMatrix4(new THREE.Matrix4().multiplyMatrices(sceneInv, child.matrixWorld));
+    parts.push({ geo, mat: _fixMat(child.material) });
+  });
+  if (!parts.length) return null;
+
+  function combinedBox() {
+    const b = new THREE.Box3();
+    parts.forEach(p => { p.geo.computeBoundingBox(); b.union(p.geo.boundingBox); });
+    return b;
+  }
+
+  // Auto-correct if model is lying on its side
+  let box = combinedBox();
+  const sz = new THREE.Vector3(); box.getSize(sz);
+  let fix = null;
+  if (sz.z > sz.y + 0.05)      fix = new THREE.Matrix4().makeRotationX(-Math.PI / 2);
+  else if (sz.x > sz.y + 0.05) fix = new THREE.Matrix4().makeRotationZ( Math.PI / 2);
+  if (fix) {
+    parts.forEach(p => p.geo.applyMatrix4(fix));
+    box = combinedBox(); box.getSize(sz);
+  }
+
+  // Center and uniform scale to 1 m unit
+  const c = new THREE.Vector3(); box.getCenter(c);
+  const s = 1.0 / Math.max(sz.x, sz.y, sz.z);
+  parts.forEach(p => { p.geo.translate(-c.x, -c.y, -c.z); p.geo.scale(s, s, s); });
+
+  // Bottom at y = 0
+  box = combinedBox();
+  const minY = box.min.y;
+  parts.forEach(p => p.geo.translate(0, -minY, 0));
+
+  return parts;
+}
+
+const _fbColors = [0x2d8c18, 0x5ab830];
+['low_poly_tree_1.glb', 'low_poly_tree_2.glb'].forEach((name, i) => {
+  _loader.load(`assets/models/${name}`, gltf => {
+    treePartsList[i] = _normTreeParts(gltf) ??
+      [{ geo: new THREE.CylinderGeometry(0.15, 0.25, 1, 6),
+         mat: new THREE.MeshLambertMaterial({ color: _fbColors[i] }) }];
+    _onAsset();
+  }, undefined, () => {
+    treePartsList[i] = [{ geo: new THREE.CylinderGeometry(0.15, 0.25, 1, 6),
+                          mat: new THREE.MeshLambertMaterial({ color: _fbColors[i] }) }];
+    _onAsset();
+  });
+});
