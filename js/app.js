@@ -68,7 +68,7 @@ function fbm(x, y, oct, s) {
 // ─────────────────────────────────────────────────────────────
 let worldMap  = [];
 let heightMap = [];
-let treeList  = [], rockList = [], starList = [];
+let treeList  = [], rockList = [], starList = [], snowList = [];
 let worldSeed = 0;
 let stars = [];
 const cloudGroups = [];
@@ -190,9 +190,9 @@ function generateMap() {
         case T.DEEP:   heightMap[z][x] = -0.5;         break;
         case T.WATER:  heightMap[z][x] = -0.15;        break;
         case T.SAND:   heightMap[z][x] =  0.05;        break;
-        case T.GRASS:  heightMap[z][x] =  n * 1.8;     break;
-        case T.FOREST: heightMap[z][x] =  0.4 + n*2.2; break;
-        case T.MOUND:  heightMap[z][x] =  2.2 + n*3.5; break;
+        case T.GRASS:  heightMap[z][x] =  n * 2.8;      break;
+        case T.FOREST: heightMap[z][x] =  0.6 + n*5.0;  break;
+        case T.MOUND:  heightMap[z][x] =  6.0 + n*20.0; break; // montañas muy altas
         default:       heightMap[z][x] =  0;            break;
       }
     }
@@ -227,6 +227,7 @@ function generateMap() {
 
       if ((t === T.MOUND || t === T.GRASS) && hash(x, z, worldSeed+2) > 0.87) rockList.push([x, z]);
       if (STAR_TILES.has(t) && hash(x, z, worldSeed+99) > 0.975) starList.push([x, z]);
+      if (t === T.MOUND && heightMap[z][x] > 16) snowList.push([x, z]); // cimas nevadas
     }
   }
 }
@@ -255,6 +256,25 @@ function carvePaths() {
   for (let x = 32; x < 56; x++) {
     if (SAFE(worldMap[26][x])) worldMap[26][x] = T.PATH;
   }
+
+  // ── Caminos a mazmorras ─────────────────────────────────────
+  // Skull Woods (NW): camino desde x=7 bajando hasta E-W road
+  for (let z = 9; z < 34; z++)
+    if (SAFE(worldMap[z][7])) worldMap[z][7] = T.PATH;
+  // Eastern Palace (E): desde castillo este hasta palacio
+  for (let x = 31; x < 50; x++)
+    if (SAFE(worldMap[22][x])) worldMap[22][x] = T.PATH;
+  for (let z = 23; z < 34; z++)
+    if (SAFE(worldMap[z][50])) worldMap[z][50] = T.PATH;
+  // Desert Palace (SW): road este desde el palacio
+  for (let x = 9; x < 30; x++)
+    if (SAFE(worldMap[50][x])) worldMap[50][x] = T.PATH;
+  // Swamp Palace (S-center): camino norte hasta E-W road
+  for (let z = 34; z < 52; z++)
+    if (SAFE(worldMap[z][23])) worldMap[z][23] = T.PATH;
+  // Ice Palace (SE): camino oeste hasta main road
+  for (let x = 32; x < 44; x++)
+    if (SAFE(worldMap[52][x])) worldMap[52][x] = T.PATH;
 }
 
 function placeDungeons() {
@@ -282,7 +302,7 @@ function placeDungeons() {
 // ─────────────────────────────────────────────────────────────
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(COLOR.SKY);
-scene.fog        = new THREE.FogExp2(COLOR.SKY, 0.010);
+scene.fog        = new THREE.FogExp2(0xd0eaf8, 0.024); // neblina oceánica en el perímetro
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -297,7 +317,7 @@ document.body.appendChild(VRButton.createButton(renderer));
 
 // Camera rig (dolly) — move this for locomotion
 const rig    = new THREE.Group();
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 180);
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 600);
 camera.position.set(0, EYE, 0);
 rig.add(camera);
 scene.add(rig);
@@ -335,6 +355,15 @@ function hexToRgb(hex) {
 }
 
 function buildScene() {
+  // ── Océano extendido — plano enorme debajo del mapa ──────────
+  const seaPlane = new THREE.Mesh(
+    new THREE.PlaneGeometry(2000, 2000),
+    new THREE.MeshLambertMaterial({ color: COLOR.WATER })
+  );
+  seaPlane.rotation.x = -Math.PI / 2;
+  seaPlane.position.set(WORLD * TILE / 2, -0.25, WORLD * TILE / 2);
+  scene.add(seaPlane);
+
   // ── Smooth terrain mesh (vertex-colored BufferGeometry) ──────
   const V = WORLD + 1; // vertices per side
   const positions = new Float32Array(V * V * 3);
@@ -620,6 +649,24 @@ function buildScene() {
       scene.add(mesh);
       stars.push({ mesh, collected: false, baseY, phase: hash(x, z, worldSeed+55) * Math.PI * 2 });
     }
+  }
+
+  // ── Nieve en cimas ───────────────────────────────────────────
+  if (snowList.length) {
+    const snowMat = new THREE.MeshLambertMaterial({ color: 0xeef6ff, side: THREE.DoubleSide });
+    const snowGeo = new THREE.PlaneGeometry(TILE * 1.1, TILE * 1.1);
+    const snowIM  = new THREE.InstancedMesh(snowGeo, snowMat, snowList.length);
+    snowIM.receiveShadow = true;
+    snowList.forEach(([x, z], i) => {
+      const wx = x * TILE + TILE / 2, wz = z * TILE + TILE / 2;
+      dummy.position.set(wx, groundAt(wx, wz) + 0.08, wz);
+      dummy.rotation.set(-Math.PI / 2, 0, hash(x, z, worldSeed+33) * Math.PI);
+      dummy.scale.setScalar(0.85 + hash(x, z, worldSeed+44) * 0.4);
+      dummy.updateMatrix();
+      snowIM.setMatrixAt(i, dummy.matrix);
+    });
+    snowIM.instanceMatrix.needsUpdate = true;
+    scene.add(snowIM);
   }
 
   // ── Dungeon torches ──────────────────────────────────────────
