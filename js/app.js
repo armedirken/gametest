@@ -624,6 +624,20 @@ function leftStick() {
   return [0, 0];
 }
 
+function rightStick() {
+  const session = renderer.xr.getSession();
+  if (!session) return [0, 0];
+  for (const src of session.inputSources) {
+    if (src.gamepad && src.handedness === 'right') {
+      const a = src.gamepad.axes;
+      if (a.length >= 4) return [a[2], a[3]];
+    }
+  }
+  return [0, 0];
+}
+
+const TURN_SPEED = 1.6; // rad/s for smooth VR turning
+
 renderer.xr.addEventListener('sessionstart', () => { camera.position.set(0, 0, 0); });
 renderer.xr.addEventListener('sessionend',   () => { camera.position.set(0, EYE, 0); });
 
@@ -778,6 +792,12 @@ function move(dt) {
   const [ax, az] = leftStick();
   if (Math.abs(ax) > 0.12) mx += ax;
   if (Math.abs(az) > 0.12) mz += az;
+
+  // Right stick — smooth turn (VR only; desktop uses mouse)
+  if (renderer.xr.isPresenting) {
+    const [rx] = rightStick();
+    if (Math.abs(rx) > 0.15) rig.rotation.y -= rx * TURN_SPEED * dt;
+  }
 
   stepTimer = Math.max(0, stepTimer - dt);
 
