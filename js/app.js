@@ -1027,9 +1027,16 @@ function updateEnemies(dt) {
       e.mesh.rotation.x = 0; e.mesh.rotation.z = 0;
     }
 
-    // Ground snap
-    e.mesh.position.y = groundAt(e.mesh.position.x, e.mesh.position.z);
+    // Ground snap — smooth interpolation avoids popping on terrain edges
+    const gY = groundAt(e.mesh.position.x, e.mesh.position.z);
+    e.mesh.position.y += (gY - e.mesh.position.y) * Math.min(1, dt * 12);
     const body = e.mesh.children[0]; // body sphere
+
+    // Three.js lookAt points -Z toward target, but enemies face +Z (eyes at z=0.33).
+    // Use atan2 directly so +Z faces the target.
+    const faceToward = (tx, tz) => {
+      e.mesh.rotation.y = Math.atan2(tx - e.mesh.position.x, tz - e.mesh.position.z);
+    };
 
     if (e.aggroed) {
       // ── AGGROED ──────────────────────────────────────────────
@@ -1038,30 +1045,27 @@ function updateEnemies(dt) {
         const spd = 2.2 * dt;
         e.mesh.position.x += dx / dist * spd;
         e.mesh.position.z += dz / dist * spd;
-        e.mesh.lookAt(px, e.mesh.position.y, pz);
+        faceToward(px, pz);
         e.mesh.rotation.x = 0; e.mesh.rotation.z = 0;
         body.position.y = 0.3 + Math.abs(Math.sin(elapsed * 9 + e.phase)) * 0.09;
-        // Reset lunge timer while chasing so it's fresh when in range
         if (e.lungePhase !== 'cooldown') { e.lungePhase = 'cooldown'; e.lungeT = 0.3; }
       } else {
         // In lunge range — run lunge cycle
         e.lungeT -= dt;
 
         if (e.lungePhase === 'cooldown') {
-          // Face player, idle sway
-          e.mesh.lookAt(px, e.mesh.position.y, pz);
+          faceToward(px, pz);
           e.mesh.rotation.x = 0;
           body.position.y = 0.3 + Math.sin(elapsed * 5 + e.phase) * 0.03;
           if (e.lungeT <= 0) { e.lungePhase = 'wait'; e.lungeT = 0.45; }
 
         } else if (e.lungePhase === 'wait') {
-          // Wind-up: rapid head bob, lean forward slightly
-          e.mesh.lookAt(px, e.mesh.position.y, pz);
+          // Wind-up: rapid head bob, lean forward
+          faceToward(px, pz);
           const bob = Math.sin(elapsed * 14 + e.phase);
           body.position.y = 0.3 + bob * 0.07;
-          e.mesh.rotation.x = -0.15 + bob * 0.05;
+          e.mesh.rotation.x = -0.12 + bob * 0.05;
           if (e.lungeT <= 0) {
-            // LAUNCH
             e.lungePhase = 'lunge';
             e.lungeT = 0.22;
             e.lungeDamaged = false;
@@ -1069,12 +1073,15 @@ function updateEnemies(dt) {
           }
 
         } else if (e.lungePhase === 'lunge') {
-          // Dash forward, tilted
-          e.mesh.rotation.x = -0.55;
+          // Dash forward — mild tilt, tile-safe movement
+          e.mesh.rotation.x = -0.28;
           body.position.y = 0.3;
-          e.mesh.position.x += e.lungeDir.x * 7 * dt;
-          e.mesh.position.z += e.lungeDir.z * 7 * dt;
-          // Deal damage once per lunge on contact
+          const newX = e.mesh.position.x + e.lungeDir.x * 7 * dt;
+          const newZ = e.mesh.position.z + e.lungeDir.z * 7 * dt;
+          if (tileAt(newX, newZ) !== T.DEEP) {
+            e.mesh.position.x = newX;
+            e.mesh.position.z = newZ;
+          }
           if (!e.lungeDamaged && dist < 1.4) {
             e.lungeDamaged = true;
             playerHP = Math.max(0, playerHP - 1);
@@ -1083,18 +1090,21 @@ function updateEnemies(dt) {
           if (e.lungeT <= 0) {
             e.lungePhase = 'retreat';
             e.lungeT = 0.38;
-            e.lungeDir.negate(); // reverse = retreat direction
+            e.lungeDir.negate();
             e.mesh.rotation.x = 0;
           }
 
         } else if (e.lungePhase === 'retreat') {
-          // Back away quickly
-          e.mesh.position.x += e.lungeDir.x * 4.5 * dt;
-          e.mesh.position.z += e.lungeDir.z * 4.5 * dt;
+          // Back away — tile-safe movement
+          const newX = e.mesh.position.x + e.lungeDir.x * 4.5 * dt;
+          const newZ = e.mesh.position.z + e.lungeDir.z * 4.5 * dt;
+          if (tileAt(newX, newZ) !== T.DEEP) {
+            e.mesh.position.x = newX;
+            e.mesh.position.z = newZ;
+          }
           body.position.y = 0.3;
           if (e.lungeT <= 0) {
             e.lungePhase = 'cooldown';
-            // Slightly random cooldown per enemy
             e.lungeT = 0.5 + hash(e.spawnX, e.spawnZ, ++e.patrolStep) * 0.5;
           }
         }
@@ -1105,13 +1115,11 @@ function updateEnemies(dt) {
       e.mesh.rotation.x = 0; e.mesh.rotation.z = 0;
 
       if (e.patrolPause > 0) {
-        // Waiting — gentle idle sway
         e.patrolPause -= dt;
         body.position.y = 0.3 + Math.sin(elapsed * 2.5 + e.phase) * 0.02;
         e.mesh.rotation.z = Math.sin(elapsed * 1.8 + e.phase) * 0.04;
       } else {
         if (!e.patrolTarget) {
-          // Pick a new point near spawn using deterministic hash
           const a = hash(e.spawnX, e.spawnZ, ++e.patrolStep) * Math.PI * 2;
           const r = 2 + hash(e.spawnZ, e.patrolStep, e.spawnX) * 4;
           e.patrolTarget = {
@@ -1126,11 +1134,10 @@ function updateEnemies(dt) {
           const spd = 1.3 * dt;
           e.mesh.position.x += ptdx / ptDist * spd;
           e.mesh.position.z += ptdz / ptDist * spd;
-          e.mesh.lookAt(e.patrolTarget.x, e.mesh.position.y, e.patrolTarget.z);
+          e.mesh.rotation.y = Math.atan2(ptdx, ptdz); // face patrol direction (+Z forward)
           e.mesh.rotation.z = 0;
           body.position.y = 0.3 + Math.abs(Math.sin(elapsed * 5 + e.phase)) * 0.06;
         } else {
-          // Arrived — wait before next point
           e.patrolTarget = null;
           e.patrolPause = 1.0 + hash(e.patrolStep, e.spawnX, e.spawnZ) * 1.5;
         }
