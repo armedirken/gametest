@@ -198,6 +198,13 @@ function generateMap() {
     }
   }
 
+  // ── Plateau pre-blur — meseta amplia para el castillo de Death Mountain ──
+  const MFORT_H = 14;
+  for (let z = 2; z < 14; z++)
+    for (let x = 19; x < 43; x++)
+      if (worldMap[z][x] === T.MOUND || worldMap[z][x] === T.FOREST)
+        heightMap[z][x] = MFORT_H; // meseta plana antes del blur → pendiente suave al borde
+
   // ── Blur 3 pasadas — pendientes suaves sin acantilados bruscos ──
   for (let pass = 0; pass < 3; pass++) {
     const blurred = heightMap.map(row => [...row]);
@@ -218,16 +225,16 @@ function generateMap() {
     heightMap = blurred;
   }
 
-  // ── Castillo Montaña — Death Mountain summit (plateau height = 13m) ──
-  const MFORT_H = 13;
-  for (let z = 5; z < 9; z++) {
-    for (let x = 27; x < 33; x++) {
-      const wall = z === 5 || z === 8 || x === 27 || x === 32;
+  // ── Castillo Montaña — castle grande en la meseta (14x7 tiles) ──
+  for (let z = 4; z < 11; z++) {
+    for (let x = 24; x < 38; x++) {
+      const wall = z === 4 || z === 10 || x === 24 || x === 37;
       worldMap[z][x] = wall ? T.DWALL : T.DFLOOR;
-      heightMap[z][x] = MFORT_H;
+      heightMap[z][x] = MFORT_H; // restaurar tras blur
     }
   }
-  worldMap[8][29] = T.PATH; // puerta sur del castillo montaña
+  worldMap[10][30] = T.PATH;
+  worldMap[10][31] = T.PATH; // puerta sur (2 tiles de ancho)
 
   // ── TREE / ROCK / STAR LISTS ─────────────────────────────
   treeList = []; rockList = []; starList = [];
@@ -1750,6 +1757,7 @@ function drawMinimap() {
   const pz = rig.position.z / (WORLD * TILE) * WORLD;
   ctx.fillStyle = '#ff3333';
   ctx.fillRect(px - 1.5, pz - 1.5, 3, 3);
+  if (mmTex3d) mmTex3d.needsUpdate = true;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1757,25 +1765,28 @@ function drawMinimap() {
 // ─────────────────────────────────────────────────────────────
 let hpBarEl;
 // 3D HUD canvas — works in desktop and VR
-let hudCtx3d = null, hudTex3d = null;
+let hudCtx3d = null, hudTex3d = null, mmTex3d = null;
 
 function drawHUD3d() {
   if (!hudCtx3d) return;
   const ctx = hudCtx3d;
-  ctx.clearRect(0, 0, 256, 64);
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  if (ctx.roundRect) { ctx.roundRect(2, 2, 252, 60, 10); ctx.fill(); }
-  else { ctx.fillRect(2, 2, 252, 60); }
-  ctx.font = 'bold 28px sans-serif';
+  ctx.clearRect(0, 0, 512, 128);
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  if (ctx.roundRect) { ctx.roundRect(2, 2, 508, 124, 14); ctx.fill(); }
+  else ctx.fillRect(2, 2, 508, 124);
+  // Corazones
+  ctx.font = 'bold 54px sans-serif';
   ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
   for (let i = 0; i < 5; i++) {
-    ctx.fillStyle = i < playerHP ? '#ff4444' : '#442222';
-    ctx.fillText('♥', 10 + i * 44, 32);
+    ctx.fillStyle = i < playerHP ? '#ff3344' : '#44222a';
+    ctx.fillText('♥', 12 + i * 62, 64);
   }
+  // Monedas
   const col = stars.filter(s => s.collected).length;
   ctx.fillStyle = '#ffd700';
-  ctx.font = 'bold 20px sans-serif';
-  ctx.fillText('★ ' + col + ' / ' + stars.length, 240, 32);
+  ctx.font = 'bold 40px sans-serif';
+  ctx.fillText('● ' + col + ' / ' + stars.length, 326, 64);
   if (hudTex3d) hudTex3d.needsUpdate = true;
 }
 
@@ -1841,16 +1852,27 @@ function buildHUD() {
 
   // 3D HUD — visible in VR headset, attached to camera
   const hc = document.createElement('canvas');
-  hc.width = 256; hc.height = 64;
+  hc.width = 512; hc.height = 128;
   hudCtx3d = hc.getContext('2d');
   hudTex3d = new THREE.CanvasTexture(hc);
   const hm = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.5, 0.125),
+    new THREE.PlaneGeometry(0.85, 0.21),
     new THREE.MeshBasicMaterial({ map: hudTex3d, transparent: true, depthTest: false })
   );
-  hm.position.set(0, -0.28, -0.7);
+  hm.position.set(0, -0.30, -0.75);
   hm.renderOrder = 999;
   camera.add(hm);
+
+  // Minimapa 3D en VR — esquina superior izquierda
+  mmTex3d = new THREE.CanvasTexture(mmDisp);
+  const mmMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.20, 0.20),
+    new THREE.MeshBasicMaterial({ map: mmTex3d, depthTest: false })
+  );
+  mmMesh.position.set(-0.40, 0.22, -0.75);
+  mmMesh.renderOrder = 999;
+  camera.add(mmMesh);
+
   drawHUD3d();
 }
 
