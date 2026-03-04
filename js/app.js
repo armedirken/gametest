@@ -257,7 +257,7 @@ function generateMap() {
         treeLists[0].push([x, z]);
 
       if ((t === T.MOUND || t === T.GRASS) && hash(x, z, worldSeed+2) > 0.87) rockList.push([x, z]);
-      if (STAR_TILES.has(t) && hash(x, z, worldSeed+99) > 0.975) starList.push([x, z]);
+      if (starList.length < 10 && STAR_TILES.has(t) && hash(x, z, worldSeed+99) > 0.91) starList.push([x, z]);
     }
   }
 }
@@ -457,30 +457,7 @@ function buildScene() {
     wBaseY = new Float32Array(wp.count);
     for (let i = 0; i < wp.count; i++) { wBaseX[i] = wp.getX(i); wBaseY[i] = wp.getY(i); } }
 
-  // ── Shoreline foam ───────────────────────────────────────────
-  const LAND_T = new Set([T.GRASS, T.SAND, T.PATH, T.MOUND, T.FOREST, T.DFLOOR, T.DWALL]);
-  const foamTiles = [];
-  for (let z = 0; z < WORLD; z++)
-    for (let x = 0; x < WORLD; x++) {
-      if (worldMap[z][x] !== T.WATER) continue;
-      if ([[z-1,x],[z+1,x],[z,x-1],[z,x+1]].some(
-            ([tz,tx]) => tz>=0&&tz<WORLD&&tx>=0&&tx<WORLD && LAND_T.has(worldMap[tz][tx])))
-        foamTiles.push([x, z]);
-    }
-  if (foamTiles.length) {
-    foamMat = new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 });
-    const foamGeo = new THREE.PlaneGeometry(TILE * 0.9, TILE * 0.9);
-    const foamIM  = new THREE.InstancedMesh(foamGeo, foamMat, foamTiles.length);
-    foamTiles.forEach(([x, z], i) => {
-      dummy.position.set(x * TILE + TILE/2, -0.06, z * TILE + TILE/2);
-      dummy.rotation.set(-Math.PI / 2, 0, 0);
-      dummy.scale.set(1, 1, 1);
-      dummy.updateMatrix();
-      foamIM.setMatrixAt(i, dummy.matrix);
-    });
-    foamIM.instanceMatrix.needsUpdate = true;
-    scene.add(foamIM);
-  }
+  // Foam eliminado — causaba cuadrados grises cerca de la costa
 
   // ── DWALL — GLB rock stacks ───────────────────────────────────
   const dwalls = [];
@@ -670,16 +647,16 @@ function buildScene() {
     scene.add(rIM);
   }
 
-  // ── Stars ────────────────────────────────────────────────────
+  // ── Monedas — cilindros dorados giratorios ───────────────────
   stars = [];
   if (starList.length) {
-    const starGeo = new THREE.OctahedronGeometry(0.22);
-    const starMat = new THREE.MeshLambertMaterial({
-      color: 0xffdd00, emissive: 0xffaa00, emissiveIntensity: 0.9
+    const coinGeo = new THREE.CylinderGeometry(0.66, 0.66, 0.18, 16); // moneda gruesa
+    const coinMat = new THREE.MeshLambertMaterial({
+      color: 0xffd700, emissive: 0xcc8800, emissiveIntensity: 0.6
     });
     for (const [x, z] of starList) {
-      const mesh = new THREE.Mesh(starGeo, starMat);
-      const baseY = groundAt(x * TILE + TILE/2, z * TILE + TILE/2) + 0.9;
+      const mesh = new THREE.Mesh(coinGeo, coinMat);
+      const baseY = groundAt(x * TILE + TILE/2, z * TILE + TILE/2) + 1.0;
       mesh.position.set(x * TILE + TILE/2, baseY, z * TILE + TILE/2);
       mesh.castShadow = true;
       scene.add(mesh);
@@ -1262,9 +1239,11 @@ function updateEnemies(dt) {
           }
 
         } else if (e.lungePhase === 'lunge') {
-          // Dash forward — mild tilt, tile-safe movement
+          // Dash forward — salta a la altura del jugador para poder golpearlo
           e.mesh.rotation.x = -0.28;
           body.position.y = 0.3;
+          const targetY = rig.position.y + EYE * 0.55; // pecho del jugador
+          e.mesh.position.y += (targetY - e.mesh.position.y) * Math.min(1, 12 * dt);
           const newX = e.mesh.position.x + e.lungeDir.x * 7 * dt;
           const newZ = e.mesh.position.z + e.lungeDir.z * 7 * dt;
           if (tileAt(newX, newZ) !== T.DEEP) {
@@ -1284,7 +1263,9 @@ function updateEnemies(dt) {
           }
 
         } else if (e.lungePhase === 'retreat') {
-          // Back away — tile-safe movement
+          // Vuelve al suelo y retrocede
+          const groundY = groundAt(e.mesh.position.x, e.mesh.position.z);
+          e.mesh.position.y += (groundY - e.mesh.position.y) * Math.min(1, 10 * dt);
           const newX = e.mesh.position.x + e.lungeDir.x * 4.5 * dt;
           const newZ = e.mesh.position.z + e.lungeDir.z * 4.5 * dt;
           if (tileAt(newX, newZ) !== T.DEEP) {
@@ -1355,8 +1336,10 @@ function updateEnemies(dt) {
 // ─────────────────────────────────────────────────────────────
 // PUSH ROCKS — large boulders with simple physics
 // ─────────────────────────────────────────────────────────────
-const ROCK_HALF = 0.34;  // half the reshaped XZ (0.85 × 0.80 = 0.68 m)
-const ROCK_R    = 0.50;  // collision radius
+const ROCK_SCALE = 5;                    // push rocks son 5x más grandes
+const ROCK_HALF  = 0.34 * ROCK_SCALE;   // 1.70 m (base offset)
+const ROCK_R     = 0.50 * ROCK_SCALE;   // 2.50 m collision radius
+const hearts = [];                       // corazones de vida en el suelo
 
 function knockWallRock(wr, impulseX, impulseZ) {
   if (wr.knocked) return;
@@ -1384,10 +1367,11 @@ function spawnPushRocks() {
         const wx = x * TILE + TILE / 2, wz = z * TILE + TILE / 2;
         const mesh = new THREE.Mesh(rockGeo, rockMat);
         mesh.castShadow = mesh.receiveShadow = true;
+        mesh.scale.setScalar(ROCK_SCALE);
         mesh.rotation.y = hash(x, z, worldSeed + 33) * Math.PI * 2;
         mesh.position.set(wx, groundAt(wx, wz) + ROCK_HALF, wz);
         scene.add(mesh);
-        pushRocks.push({ mesh, vx: 0, vz: 0, hitCooldown: 0 });
+        pushRocks.push({ mesh, vx: 0, vz: 0, hitCooldown: 0, broken: false });
       }
     }
   }
@@ -1414,38 +1398,40 @@ function updatePushRocks(dt) {
 
   if (!pushRocks.length) return;
 
+  // Función que rompe una roca y suelta un corazón
+  function breakRock(r) {
+    if (r.broken) return;
+    r.broken = true;
+    scene.remove(r.mesh);
+    sfx.hit();
+    // Spawn corazón en la posición de la roca
+    const hMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.35, 8, 6),
+      new THREE.MeshLambertMaterial({ color: 0xff2244, emissive: 0xaa0022, emissiveIntensity: 0.7 })
+    );
+    hMesh.position.copy(r.mesh.position);
+    hMesh.position.y = groundAt(r.mesh.position.x, r.mesh.position.z) + 0.6;
+    scene.add(hMesh);
+    hearts.push({ mesh: hMesh, baseY: hMesh.position.y, phase: Math.random() * Math.PI * 2 });
+  }
+
   for (const r of pushRocks) {
+    if (r.broken) continue;
     r.hitCooldown = Math.max(0, r.hitCooldown - dt);
 
-    // ── Hit detection ──────────────────────────────────────────
+    // ── Hit detection — rompe la roca al primer golpe ───────────
     if (r.hitCooldown === 0) {
+      let hit = false;
       if (hasSword) {
-        // VR: sword tip impact
         const tipDist = swordTipWorld.distanceTo(r.mesh.position);
-        if (tipDist < 1.5 && swordVel > 2) {
-          const nx = r.mesh.position.x - swordTipWorld.x || 0.01;
-          const nz = r.mesh.position.z - swordTipWorld.z || 0.01;
-          const d  = Math.sqrt(nx * nx + nz * nz);
-          const impulse = Math.min(swordVel * 0.3, 9);
-          r.vx += nx / d * impulse;
-          r.vz += nz / d * impulse;
-          r.hitCooldown = 0.35;
-          sfx.hit();
-        }
+        if (tipDist < ROCK_R && swordVel > 1.5) hit = true;
       }
-      // Desktop: Space bar push
-      if (keys['Space']) {
+      if (!hit && keys['Space']) {
         const dx = r.mesh.position.x - rig.position.x;
         const dz = r.mesh.position.z - rig.position.z;
-        const d2 = dx * dx + dz * dz;
-        if (d2 < 3.5 * 3.5 && d2 > 0.01) {
-          const d = Math.sqrt(d2);
-          r.vx += dx / d * 6;
-          r.vz += dz / d * 6;
-          r.hitCooldown = 0.35;
-          sfx.hit();
-        }
+        if (dx * dx + dz * dz < (ROCK_R + 1) * (ROCK_R + 1)) hit = true;
       }
+      if (hit) { breakRock(r); continue; }
     }
 
     // Stop when barely moving
@@ -1644,7 +1630,6 @@ let rainTimer = 30 + Math.random() * 60; // first rain in 30-90s
 
 // Water animation refs (set in buildScene)
 let waterMesh = null, wBaseX = null, wBaseY = null;
-let foamMat   = null;
 
 const RAIN_COUNT = 1800;
 const rainPositions = new Float32Array(RAIN_COUNT * 3);
@@ -1689,8 +1674,6 @@ function updateWater(t) {
   }
   pos.needsUpdate = true;
   waterMesh.geometry.computeVertexNormals();
-  // Pulse foam opacity
-  if (foamMat) foamMat.opacity = 0.30 + Math.sin(t * 2.8) * 0.22;
 }
 
 function updateRain(dt) {
@@ -1902,11 +1885,26 @@ renderer.setAnimationLoop(() => {
   updateWater(elapsed);
   drawMinimap();
 
-  // Animate uncollected stars (bob + spin)
+  // Animate coins (bob + spin)
   for (const s of stars) {
     if (!s.collected) {
       s.mesh.position.y = s.baseY + Math.sin(elapsed * 2.5 + s.phase) * 0.18;
       s.mesh.rotation.y += dt * 1.8;
+    }
+  }
+
+  // Animate hearts + pickup
+  for (let i = hearts.length - 1; i >= 0; i--) {
+    const h = hearts[i];
+    h.mesh.position.y = h.baseY + Math.sin(elapsed * 3.5 + h.phase) * 0.12;
+    const dx = h.mesh.position.x - rig.position.x;
+    const dz = h.mesh.position.z - rig.position.z;
+    if (dx * dx + dz * dz < 1.4 * 1.4) {
+      scene.remove(h.mesh);
+      hearts.splice(i, 1);
+      playerHP = Math.min(5, playerHP + 1);
+      updateHPBar();
+      sfx.hit();
     }
   }
 
