@@ -70,6 +70,7 @@ let treeList  = [], rockList = [], starList = [];
 let worldSeed = 0;
 let stars = [];
 const cloudGroups = [];
+const pushRocks = [];
 
 // Fill a rectangular region with tile type t
 function paintRect(x0, z0, x1, z1, t) {
@@ -1164,6 +1165,126 @@ function updateEnemies(dt) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// PUSH ROCKS — large boulders with simple physics
+// ─────────────────────────────────────────────────────────────
+const ROCK_HALF = 0.45;  // half the box side (box = 0.9 m)
+const ROCK_R    = 0.62;  // collision radius
+
+function spawnPushRocks() {
+  const VALID = new Set([T.GRASS, T.MOUND, T.SAND]);
+  const geo = new THREE.BoxGeometry(ROCK_HALF * 2, ROCK_HALF * 2, ROCK_HALF * 2);
+  const mat = new THREE.MeshLambertMaterial({ color: 0x7a7060 });
+  for (let z = 2; z < WORLD - 2; z++) {
+    for (let x = 2; x < WORLD - 2; x++) {
+      if (VALID.has(worldMap[z][x]) && hash(x, z, worldSeed + 88) > 0.988) {
+        const wx = x * TILE + TILE / 2, wz = z * TILE + TILE / 2;
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.castShadow = mesh.receiveShadow = true;
+        mesh.position.set(wx, groundAt(wx, wz) + ROCK_HALF, wz);
+        scene.add(mesh);
+        pushRocks.push({ mesh, vx: 0, vz: 0, hitCooldown: 0 });
+      }
+    }
+  }
+}
+
+function updatePushRocks(dt) {
+  if (!pushRocks.length) return;
+  const hasSword = !!gripRefs.right;
+
+  for (const r of pushRocks) {
+    r.hitCooldown = Math.max(0, r.hitCooldown - dt);
+
+    // ── Hit detection ──────────────────────────────────────────
+    if (r.hitCooldown === 0) {
+      if (hasSword) {
+        // VR: sword tip impact
+        const tipDist = swordTipWorld.distanceTo(r.mesh.position);
+        if (tipDist < 1.5 && swordVel > 2) {
+          const nx = r.mesh.position.x - swordTipWorld.x || 0.01;
+          const nz = r.mesh.position.z - swordTipWorld.z || 0.01;
+          const d  = Math.sqrt(nx * nx + nz * nz);
+          const impulse = Math.min(swordVel * 0.3, 9);
+          r.vx += nx / d * impulse;
+          r.vz += nz / d * impulse;
+          r.hitCooldown = 0.35;
+          sfx.hit();
+        }
+      }
+      // Desktop: Space bar push
+      if (keys['Space']) {
+        const dx = r.mesh.position.x - rig.position.x;
+        const dz = r.mesh.position.z - rig.position.z;
+        const d2 = dx * dx + dz * dz;
+        if (d2 < 3.5 * 3.5 && d2 > 0.01) {
+          const d = Math.sqrt(d2);
+          r.vx += dx / d * 6;
+          r.vz += dz / d * 6;
+          r.hitCooldown = 0.35;
+          sfx.hit();
+        }
+      }
+    }
+
+    // Stop when barely moving
+    if (Math.sqrt(r.vx * r.vx + r.vz * r.vz) < 0.06) { r.vx = 0; r.vz = 0; }
+    if (r.vx === 0 && r.vz === 0) continue;
+
+    // ── Move + tile collision ──────────────────────────────────
+    const nx = r.mesh.position.x + r.vx * dt;
+    const nz = r.mesh.position.z + r.vz * dt;
+    const txn = tileAt(nx, r.mesh.position.z);
+    const tzn = tileAt(r.mesh.position.x, nz);
+    if (!SOLID.has(txn) && txn !== T.DEEP) r.mesh.position.x = nx; else r.vx *= -0.25;
+    if (!SOLID.has(tzn) && tzn !== T.DEEP) r.mesh.position.z = nz; else r.vz *= -0.25;
+
+    // ── Ground follow ──────────────────────────────────────────
+    r.mesh.position.y = groundAt(r.mesh.position.x, r.mesh.position.z) + ROCK_HALF;
+
+    // ── Rolling rotation ───────────────────────────────────────
+    r.mesh.rotation.x -= r.vz * dt * 0.55;
+    r.mesh.rotation.z += r.vx * dt * 0.55;
+
+    // ── Friction ───────────────────────────────────────────────
+    r.vx *= Math.max(0, 1 - 4.5 * dt);
+    r.vz *= Math.max(0, 1 - 4.5 * dt);
+
+    // ── Rock–rock collisions ───────────────────────────────────
+    for (const other of pushRocks) {
+      if (other === r) continue;
+      const cx = other.mesh.position.x - r.mesh.position.x;
+      const cz = other.mesh.position.z - r.mesh.position.z;
+      const dist = Math.sqrt(cx * cx + cz * cz);
+      if (dist < ROCK_R * 2 && dist > 0.001) {
+        const ux = cx / dist, uz = cz / dist;
+        const relV = (r.vx - other.vx) * ux + (r.vz - other.vz) * uz;
+        if (relV > 0) {
+          r.vx     -= relV * 0.75 * ux;  r.vz     -= relV * 0.75 * uz;
+          other.vx += relV * 0.75 * ux;  other.vz += relV * 0.75 * uz;
+        }
+        const pen = (ROCK_R * 2 - dist) * 0.5;
+        r.mesh.position.x     -= ux * pen;  r.mesh.position.z     -= uz * pen;
+        other.mesh.position.x += ux * pen;  other.mesh.position.z += uz * pen;
+      }
+    }
+
+    // ── Moving rock damages enemies ────────────────────────────
+    const curSpd = Math.sqrt(r.vx * r.vx + r.vz * r.vz);
+    if (curSpd > 2) {
+      for (const e of enemies) {
+        if (e.dead || e.hitCooldown > 0) continue;
+        const ex = e.mesh.position.x - r.mesh.position.x;
+        const ez = e.mesh.position.z - r.mesh.position.z;
+        if (ex * ex + ez * ez < ROCK_R * ROCK_R) {
+          e.hp--; e.hitCooldown = 0.5; sfx.hit();
+          if (e.hp <= 0) { e.dead = true; sfx.death(); }
+        }
+      }
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // GAME OVER / VICTORY / STARS
 // ─────────────────────────────────────────────────────────────
 let gameEnded = false;
@@ -1550,6 +1671,7 @@ renderer.setAnimationLoop(() => {
   if (!gameEnded) {
     move(dt);
     updateEnemies(dt);
+    updatePushRocks(dt);
     checkStarCollection();
     updateDayNight(dt);
     updateRain(dt);
@@ -1580,6 +1702,7 @@ generateMap();
 buildScene();
 spawnPlayer();
 spawnEnemies();
+spawnPushRocks();
 buildMinimap();
 buildHUD();
 updateStarCounter();
