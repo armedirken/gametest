@@ -68,7 +68,7 @@ function fbm(x, y, oct, s) {
 // ─────────────────────────────────────────────────────────────
 let worldMap  = [];
 let heightMap = [];
-let treeList  = [], rockList = [], starList = [], snowList = [];
+let treeList  = [], rockList = [], starList = [];
 let worldSeed = 0;
 let stars = [];
 const cloudGroups = [];
@@ -190,13 +190,44 @@ function generateMap() {
         case T.DEEP:   heightMap[z][x] = -0.5;         break;
         case T.WATER:  heightMap[z][x] = -0.15;        break;
         case T.SAND:   heightMap[z][x] =  0.05;        break;
-        case T.GRASS:  heightMap[z][x] =  n * 2.8;      break;
-        case T.FOREST: heightMap[z][x] =  0.6 + n*5.0;  break;
-        case T.MOUND:  heightMap[z][x] =  6.0 + n*20.0; break; // montañas muy altas
+        case T.GRASS:  heightMap[z][x] =  n * 2.8;       break;
+        case T.FOREST: heightMap[z][x] =  0.6 + n*5.0;   break;
+        case T.MOUND:  heightMap[z][x] =  1.5 + n*23.5;  break; // rango 1.5-25m
         default:       heightMap[z][x] =  0;            break;
       }
     }
   }
+
+  // ── Blur 3 pasadas — pendientes suaves sin acantilados bruscos ──
+  for (let pass = 0; pass < 3; pass++) {
+    const blurred = heightMap.map(row => [...row]);
+    for (let z = 1; z < WORLD - 1; z++) {
+      for (let x = 1; x < WORLD - 1; x++) {
+        const t = worldMap[z][x];
+        if (t === T.DWALL || t === T.DFLOOR) continue;
+        let sum = 0, w = 0;
+        for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+          const nt = worldMap[z+dz][x+dx];
+          if (nt === T.DWALL || nt === T.DFLOOR) continue;
+          const wt = (dz === 0 && dx === 0) ? 4 : (dz === 0 || dx === 0) ? 2 : 1;
+          sum += heightMap[z+dz][x+dx] * wt; w += wt;
+        }
+        blurred[z][x] = sum / w;
+      }
+    }
+    heightMap = blurred;
+  }
+
+  // ── Castillo Montaña — Death Mountain summit (plateau height = 13m) ──
+  const MFORT_H = 13;
+  for (let z = 5; z < 9; z++) {
+    for (let x = 27; x < 33; x++) {
+      const wall = z === 5 || z === 8 || x === 27 || x === 32;
+      worldMap[z][x] = wall ? T.DWALL : T.DFLOOR;
+      heightMap[z][x] = MFORT_H;
+    }
+  }
+  worldMap[8][29] = T.PATH; // puerta sur del castillo montaña
 
   // ── TREE / ROCK / STAR LISTS ─────────────────────────────
   treeList = []; rockList = []; starList = [];
@@ -227,7 +258,6 @@ function generateMap() {
 
       if ((t === T.MOUND || t === T.GRASS) && hash(x, z, worldSeed+2) > 0.87) rockList.push([x, z]);
       if (STAR_TILES.has(t) && hash(x, z, worldSeed+99) > 0.975) starList.push([x, z]);
-      if (t === T.MOUND && heightMap[z][x] > 16) snowList.push([x, z]); // cimas nevadas
     }
   }
 }
@@ -283,8 +313,7 @@ function placeDungeons() {
     { x:  4, z:  4, w: 7, h: 6 },  // Skull Woods (NW forest)
     { x: 46, z: 18, w: 8, h: 7 },  // Eastern Palace (east mountains)
     { x:  4, z: 48, w: 8, h: 6 },  // Desert Palace (SW desert)
-    { x: 42, z: 53, w: 7, h: 5 },  // Ice Palace (Lake Hylia island)
-    { x: 20, z: 52, w: 7, h: 5 },  // Swamp Palace (south marsh)
+    // Ice Palace y Swamp Palace eliminados (estaban en el mar sin acceso)
   ];
   for (const d of LOCS) {
     for (let z = d.z; z < d.z + d.h && z < WORLD; z++) {
@@ -378,8 +407,13 @@ function buildScene() {
       for (const [tz, tx] of [[iz-1,ix-1],[iz-1,ix],[iz,ix-1],[iz,ix]]) {
         if (tz < 0 || tz >= WORLD || tx < 0 || tx >= WORLD) continue;
         const t  = worldMap[tz][tx];
-        const h  = (t === T.DWALL) ? 0 : heightMap[tz][tx];
-        const [r, g, b] = hexToRgb(BIOME_HEX[t] ?? COLOR.GRASS);
+        const h  = heightMap[tz][tx]; // DWALL usa heightMap real (0 o plateau)
+        let [r, g, b] = hexToRgb(BIOME_HEX[t] ?? COLOR.GRASS);
+        // Nieve en cimas: blending vertex color → blanco a partir de 15m
+        if (t === T.MOUND && h > 15) {
+          const s = Math.min((h - 15) / 7, 1);
+          r += (0.92 - r) * s; g += (0.96 - g) * s; b += (1.0 - b) * s;
+        }
         sumH += h; sumR += r; sumG += g; sumB += b; cnt++;
       }
       if (cnt === 0) cnt = 1;
@@ -500,7 +534,8 @@ function buildScene() {
           }
           px += (hash(x + ri * 5, z + ly,       worldSeed + 60) - 0.5) * 0.05;
           pz += (hash(x,          z + ri + ly*3, worldSeed + 61) - 0.5) * 0.05;
-          const py = LAYER_H * ly;
+          const baseH = heightMap[z][x] ?? 0;
+          const py = baseH + LAYER_H * ly;
           dummy.position.set(px, py, pz);
           dummy.rotation.set(0, 0, 0);
           if (type === 'corner') dummy.scale.set(CORNER_SCALE_XZ, WSCALE, CORNER_SCALE_XZ);
@@ -539,8 +574,9 @@ function buildScene() {
         const type   = tileTypes[ti];
         const alongZ = type === 'z';
 
+        const tileBaseH = heightMap[z][x] ?? 0;
         const placeM = (px, pz) => {
-          dummy.position.set(px, MERLON_BOTTOM, pz);
+          dummy.position.set(px, tileBaseH + MERLON_BOTTOM, pz);
           dummy.rotation.set(0, 0, 0);
           dummy.scale.set(MERLON_SCALE_XZ, MERLON_SCALE_Y, MERLON_SCALE_XZ);
           dummy.updateMatrix();
@@ -578,7 +614,7 @@ function buildScene() {
         const thick = 0.14 + hash(x, z, worldSeed + 44) * 0.07; // slab thickness variety
         // Rotate 0°/90°/180°/270° to break up repetition
         const ry = Math.round(hash(x, z, worldSeed + 45) * 3) * (Math.PI / 2);
-        dummy.position.set(x * TILE + TILE / 2, 0, z * TILE + TILE / 2);
+        dummy.position.set(x * TILE + TILE / 2, heightMap[z][x] ?? 0, z * TILE + TILE / 2);
         dummy.rotation.set(0, ry, 0);
         dummy.scale.set(FSCALE_XZ, thick, FSCALE_XZ);
         dummy.updateMatrix();
@@ -649,24 +685,6 @@ function buildScene() {
       scene.add(mesh);
       stars.push({ mesh, collected: false, baseY, phase: hash(x, z, worldSeed+55) * Math.PI * 2 });
     }
-  }
-
-  // ── Nieve en cimas ───────────────────────────────────────────
-  if (snowList.length) {
-    const snowMat = new THREE.MeshLambertMaterial({ color: 0xeef6ff, side: THREE.DoubleSide });
-    const snowGeo = new THREE.PlaneGeometry(TILE * 1.1, TILE * 1.1);
-    const snowIM  = new THREE.InstancedMesh(snowGeo, snowMat, snowList.length);
-    snowIM.receiveShadow = true;
-    snowList.forEach(([x, z], i) => {
-      const wx = x * TILE + TILE / 2, wz = z * TILE + TILE / 2;
-      dummy.position.set(wx, groundAt(wx, wz) + 0.08, wz);
-      dummy.rotation.set(-Math.PI / 2, 0, hash(x, z, worldSeed+33) * Math.PI);
-      dummy.scale.setScalar(0.85 + hash(x, z, worldSeed+44) * 0.4);
-      dummy.updateMatrix();
-      snowIM.setMatrixAt(i, dummy.matrix);
-    });
-    snowIM.instanceMatrix.needsUpdate = true;
-    scene.add(snowIM);
   }
 
   // ── Dungeon torches ──────────────────────────────────────────
