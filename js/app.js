@@ -297,9 +297,7 @@ scene.add(sun);
 // ─────────────────────────────────────────────────────────────
 // SCENE BUILDING
 // ─────────────────────────────────────────────────────────────
-const GEO_WALL  = new THREE.BoxGeometry(TILE, 14, TILE);
-const dummy     = new THREE.Object3D();
-const MAT_DWALL = new THREE.MeshLambertMaterial({ color: COLOR.DWALL });
+const dummy = new THREE.Object3D();
 
 // Biome color per tile type (used for vertex-colored terrain mesh)
 const BIOME_HEX = {
@@ -396,22 +394,43 @@ function buildScene() {
     scene.add(foamIM);
   }
 
-  // ── DWALL boxes (InstancedMesh) ──────────────────────────────
+  // ── DWALL — stacked stone blocks ─────────────────────────────
   const dwalls = [];
   for (let z = 0; z < WORLD; z++)
     for (let x = 0; x < WORLD; x++)
       if (worldMap[z][x] === T.DWALL) dwalls.push([x, z]);
   if (dwalls.length) {
-    const wallIM = new THREE.InstancedMesh(GEO_WALL, MAT_DWALL, dwalls.length);
-    wallIM.castShadow = wallIM.receiveShadow = true;
-    dwalls.forEach(([x, z], i) => {
-      dummy.position.set(x * TILE + TILE/2, -3.5, z * TILE + TILE/2);
-      dummy.rotation.set(0, 0, 0); dummy.scale.set(1, 1, 1);
-      dummy.updateMatrix();
-      wallIM.setMatrixAt(i, dummy.matrix);
+    const LAYERS = 5;
+    const SH = 0.70;                       // height per stone layer
+    const SW = TILE * 0.90;               // stone width/depth
+    // Two interleaved materials for visual depth
+    const matA = new THREE.MeshLambertMaterial({ color: 0x8a8a7a }); // warm light gray
+    const matB = new THREE.MeshLambertMaterial({ color: 0x686860 }); // cool dark gray
+    const geoS = new THREE.BoxGeometry(SW, SH, SW);
+    const imA  = new THREE.InstancedMesh(geoS, matA, dwalls.length * 3); // layers 0,2,4
+    const imB  = new THREE.InstancedMesh(geoS, matB, dwalls.length * 2); // layers 1,3
+    imA.castShadow = imA.receiveShadow = true;
+    imB.castShadow = imB.receiveShadow = true;
+    let iA = 0, iB = 0;
+
+    dwalls.forEach(([x, z]) => {
+      const cx = x * TILE + TILE / 2, cz = z * TILE + TILE / 2;
+      for (let ly = 0; ly < LAYERS; ly++) {
+        // Alternating brick offset + small random jitter
+        const offX = (ly & 1 ?  0.11 : -0.11) + (hash(x,   z + ly, worldSeed + 60) - 0.5) * 0.13;
+        const offZ = (ly & 1 ? -0.11 :  0.11) + (hash(z,   x + ly, worldSeed + 61) - 0.5) * 0.13;
+        const ry   = (hash(x * 3 + ly, z, worldSeed + 62) - 0.5) * 0.24; // small Y rotation
+        dummy.position.set(cx + offX, SH * (ly + 0.5), cz + offZ);
+        dummy.rotation.set(0, ry, 0);
+        dummy.scale.set(1, 1, 1);
+        dummy.updateMatrix();
+        if (ly & 1) imB.setMatrixAt(iB++, dummy.matrix);
+        else        imA.setMatrixAt(iA++, dummy.matrix);
+      }
     });
-    wallIM.instanceMatrix.needsUpdate = true;
-    scene.add(wallIM);
+    imA.instanceMatrix.needsUpdate = true;
+    imB.instanceMatrix.needsUpdate = true;
+    scene.add(imA, imB);
   }
 
   // ── Trees — round, bushy LTTP/Wind-Waker style ───────────────
