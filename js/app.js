@@ -74,6 +74,9 @@ let stars = [];
 
 const pushRocks       = [];
 const towerObstacles  = []; // { x, z, r } — colisión cilíndrica de torres
+const dragonRoosts    = []; // { x, z, topY } — cima de cada torre con dragón
+const dragons         = []; // objetos dragón activos
+const fireBalls       = []; // { mesh, vx, vy, vz, life } — bolas de fuego
 let rockGeo = null, rockMat = null; // set after GLB load
 let treeLists = [[], [], []];             // [forestList, fieldList, mountainList]
 const treePartsList = [null, null, null]; // [{geo,mat}[]] per model — preserves multi-material
@@ -1893,6 +1896,7 @@ renderer.setAnimationLoop(() => {
     move(dt);
     updateEnemies(dt);
     updatePushRocks(dt);
+    updateDragons(dt);
     checkStarCollection();
     updateDayNight(dt);
     updateRain(dt);
@@ -1969,8 +1973,9 @@ function spawnRockTowers() {
     const wx     = x * TILE + TILE / 2, wz = z * TILE + TILE / 2;
     const baseY  = groundAt(wx, wz);
     const radius = 1.0 + hash(x, z, worldSeed + 502) * 0.8; // 1.0–1.8 m
-    // Registrar colisión: radio exterior = anillo + mitad del ancho de roca escalada
+    // Registrar colisión y cima para el dragón
     towerObstacles.push({ x: wx, z: wz, r: radius + TOW_SC * 0.34 + 0.4 });
+    dragonRoosts.push({ x: wx, z: wz, topY: baseY + ROCK_H * layers });
     for (let ly = 0; ly < layers; ly++) {
       const off = (ly & 1) ? Math.PI / perLayer : 0; // capas alternas rotadas
       for (let ri = 0; ri < perLayer; ri++) {
@@ -1990,6 +1995,193 @@ function spawnRockTowers() {
 }
 
 // ─────────────────────────────────────────────────────────────
+// DRAGONS — dragones que despegan de torres y disparan fuego
+// ─────────────────────────────────────────────────────────────
+const _DMAT_BODY = new THREE.MeshLambertMaterial({ color: 0x7a1010 });
+const _DMAT_WING = new THREE.MeshLambertMaterial({ color: 0xa01818, side: THREE.DoubleSide });
+const _DMAT_EYE  = new THREE.MeshLambertMaterial({ color: 0xffee00, emissive: 0xff8800, emissiveIntensity: 1.0 });
+const _FIRE_MAT  = new THREE.MeshLambertMaterial({ color: 0xff6600, emissive: 0xff2200, emissiveIntensity: 1.2 });
+const _FIRE_GEO  = new THREE.SphereGeometry(0.22, 6, 4);
+
+function _createDragonMesh() {
+  const g = new THREE.Group();
+
+  // Cuerpo alargado
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.42, 8, 6), _DMAT_BODY);
+  body.scale.set(1, 0.65, 2.0);
+  g.add(body);
+
+  // Cabeza
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.28, 7, 5), _DMAT_BODY);
+  head.position.set(0, 0.12, 0.9);
+  g.add(head);
+
+  // Hocico (origen del fuego)
+  const snout = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.12, 0.22, 5), _DMAT_BODY);
+  snout.rotation.x = Math.PI / 2;
+  snout.position.set(0, 0.05, 1.18);
+  g.add(snout);
+
+  // Ojos brillantes
+  for (const sx of [-0.14, 0.14]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.07, 5, 4), _DMAT_EYE);
+    eye.position.set(sx, 0.22, 0.97);
+    g.add(eye);
+  }
+
+  // Alas (PlaneGeometry doble cara)
+  const wingGeo = new THREE.PlaneGeometry(1.9, 0.85, 2, 1);
+  const lWing = new THREE.Mesh(wingGeo, _DMAT_WING);
+  lWing.position.set(1.05, 0.18, -0.1);
+  lWing.rotation.set(0.12, 0, Math.PI / 7);
+  g.add(lWing);
+
+  const rWing = new THREE.Mesh(wingGeo, _DMAT_WING);
+  rWing.position.set(-1.05, 0.18, -0.1);
+  rWing.rotation.set(0.12, 0, -Math.PI / 7);
+  g.add(rWing);
+
+  // Cola
+  const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.17, 1.0, 5), _DMAT_BODY);
+  tail.rotation.x = Math.PI / 2;
+  tail.position.set(0, -0.08, -0.95);
+  g.add(tail);
+
+  // Cuernos
+  for (const sx of [-0.12, 0.12]) {
+    const horn = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.22, 4), _DMAT_BODY);
+    horn.position.set(sx, 0.38, 0.78);
+    g.add(horn);
+  }
+
+  g.scale.setScalar(1.5);
+  return { group: g, lWing, rWing };
+}
+
+function spawnDragons() {
+  for (const roost of dragonRoosts) {
+    const { group, lWing, rWing } = _createDragonMesh();
+    group.position.set(roost.x, roost.topY + 0.6, roost.z);
+    scene.add(group);
+    dragons.push({
+      mesh: group, lWing, rWing, roost,
+      state: 'perched',       // perched | takeoff | circling | returning | landing
+      stateT: 0,
+      orbitAngle: Math.random() * Math.PI * 2,
+      shootCooldown: 1.5 + Math.random() * 2,
+    });
+  }
+}
+
+function updateDragons(dt) {
+  const px = rig.position.x, pz = rig.position.z;
+  const playerWorldY = rig.position.y + EYE;
+
+  for (const d of dragons) {
+    d.stateT += dt;
+    const rx = px - d.roost.x, rz = pz - d.roost.z;
+    const distRoost = Math.sqrt(rx * rx + rz * rz);
+
+    // Aleteo — más rápido y amplio en vuelo
+    const flapSpd = d.state === 'perched' ? 1.8 : 7.5;
+    const flapAmt = d.state === 'perched' ? 0.08 : 0.52;
+    const flapVal = Math.sin(elapsed * flapSpd + d.orbitAngle);
+    d.lWing.rotation.z =  Math.PI / 7 + flapVal * flapAmt;
+    d.rWing.rotation.z = -Math.PI / 7 - flapVal * flapAmt;
+
+    if (d.state === 'perched') {
+      d.mesh.position.set(d.roost.x,
+        d.roost.topY + 0.6 + Math.sin(elapsed * 1.2) * 0.05,
+        d.roost.z);
+      d.mesh.rotation.y += dt * 0.25;
+      if (distRoost < 12) { d.state = 'takeoff'; d.stateT = 0; }
+
+    } else if (d.state === 'takeoff') {
+      const tY = groundAt(px, pz) + EYE + 3.5;
+      d.mesh.position.y  += (tY - d.mesh.position.y) * Math.min(1, dt * 3);
+      d.mesh.position.x  += (px - d.mesh.position.x) * Math.min(1, dt * 1.8);
+      d.mesh.position.z  += (pz - d.mesh.position.z) * Math.min(1, dt * 1.8);
+      if (d.stateT > 0.9) { d.state = 'circling'; d.stateT = 0; }
+
+    } else if (d.state === 'circling') {
+      d.orbitAngle += dt * 0.85;
+      const oR  = 5.5;
+      const tX  = px + Math.cos(d.orbitAngle) * oR;
+      const tZ  = pz + Math.sin(d.orbitAngle) * oR;
+      const tY  = groundAt(px, pz) + EYE + 3.2;
+      d.mesh.position.x += (tX - d.mesh.position.x) * Math.min(1, dt * 4.5);
+      d.mesh.position.y += (tY - d.mesh.position.y) * Math.min(1, dt * 3.0);
+      d.mesh.position.z += (tZ - d.mesh.position.z) * Math.min(1, dt * 4.5);
+      // Cara en la dirección de órbita (tangente)
+      d.mesh.rotation.y = d.orbitAngle + Math.PI / 2;
+
+      // Disparo
+      d.shootCooldown -= dt;
+      if (d.shootCooldown <= 0) {
+        d.shootCooldown = 2.0 + Math.random() * 1.5;
+        const fMesh = new THREE.Mesh(_FIRE_GEO, _FIRE_MAT);
+        fMesh.position.set(
+          d.mesh.position.x + Math.cos(d.orbitAngle) * 1.2,
+          d.mesh.position.y - 0.1,
+          d.mesh.position.z + Math.sin(d.orbitAngle) * 1.2
+        );
+        scene.add(fMesh);
+        const fdx = px - fMesh.position.x;
+        const fdy = playerWorldY - fMesh.position.y;
+        const fdz = pz - fMesh.position.z;
+        const fd  = Math.sqrt(fdx*fdx + fdy*fdy + fdz*fdz) || 1;
+        const spd = 11;
+        fireBalls.push({ mesh: fMesh,
+          vx: fdx/fd*spd, vy: fdy/fd*spd, vz: fdz/fd*spd, life: 3.5 });
+      }
+
+      // Retorna si el jugador se aleja demasiado de la torre
+      if (distRoost > 18) { d.state = 'returning'; d.stateT = 0; }
+
+    } else if (d.state === 'returning') {
+      const tX = d.roost.x, tY = d.roost.topY + 5, tZ = d.roost.z;
+      d.mesh.position.x += (tX - d.mesh.position.x) * Math.min(1, dt * 2.5);
+      d.mesh.position.y += (tY - d.mesh.position.y) * Math.min(1, dt * 2.5);
+      d.mesh.position.z += (tZ - d.mesh.position.z) * Math.min(1, dt * 2.5);
+      const dx = tX - d.mesh.position.x, dz = tZ - d.mesh.position.z;
+      if (Math.abs(dx) > 0.1 || Math.abs(dz) > 0.1)
+        d.mesh.rotation.y = Math.atan2(dx, dz);
+      const dist3 = Math.sqrt(dx*dx + (d.mesh.position.y-tY)**2 + dz*dz);
+      if (dist3 < 1.5)        { d.state = 'landing';  d.stateT = 0; }
+      if (distRoost < 12)     { d.state = 'circling'; d.stateT = 0; }
+
+    } else if (d.state === 'landing') {
+      const tX = d.roost.x, tY = d.roost.topY + 0.6, tZ = d.roost.z;
+      d.mesh.position.x += (tX - d.mesh.position.x) * Math.min(1, dt * 3.5);
+      d.mesh.position.y += (tY - d.mesh.position.y) * Math.min(1, dt * 3.5);
+      d.mesh.position.z += (tZ - d.mesh.position.z) * Math.min(1, dt * 3.5);
+      if (d.stateT > 1.2)  { d.state = 'perched';  d.stateT = 0; }
+      if (distRoost < 12)  { d.state = 'circling'; d.stateT = 0; }
+    }
+  }
+
+  // ── Bolas de fuego ────────────────────────────────────────
+  for (let i = fireBalls.length - 1; i >= 0; i--) {
+    const f = fireBalls[i];
+    f.life -= dt;
+    if (f.life <= 0) { scene.remove(f.mesh); fireBalls.splice(i, 1); continue; }
+    f.mesh.position.x += f.vx * dt;
+    f.mesh.position.y += f.vy * dt;
+    f.mesh.position.z += f.vz * dt;
+    f.mesh.scale.setScalar(0.5 + (f.life / 3.5) * 0.8); // encoge al morir
+    // Impacto con el jugador
+    const hx = f.mesh.position.x - px;
+    const hy = f.mesh.position.y - playerWorldY;
+    const hz = f.mesh.position.z - pz;
+    if (hx*hx + hy*hy + hz*hz < 0.9 * 0.9 && !gameEnded) {
+      scene.remove(f.mesh); fireBalls.splice(i, 1);
+      playerHP = Math.max(0, playerHP - 1);
+      updateHPBar();
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // INIT
 // ─────────────────────────────────────────────────────────────
 function initGame() {
@@ -1999,6 +2191,7 @@ function initGame() {
   spawnEnemies();
   spawnPushRocks();
   spawnRockTowers();
+  spawnDragons();
   buildMinimap();
   buildHUD();
   updateStarCounter();
