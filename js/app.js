@@ -296,57 +296,122 @@ scene.add(sun);
 // ─────────────────────────────────────────────────────────────
 // SCENE BUILDING
 // ─────────────────────────────────────────────────────────────
-// Tiles are deep pillars so adjacent height differences never show gaps.
-// Top surface sits at heightMap[z][x]; each pillar extends 10 m downward.
-// Wall pillars are 3.5 m above ground + 10.5 m below = 14 m total.
-const GEO_FLOOR = new THREE.BoxGeometry(TILE, 10, TILE);   // center = top - 5
-const GEO_WALL  = new THREE.BoxGeometry(TILE, 14, TILE);   // center = top + 1.75 - 7 = h - 3.5
-const dummy      = new THREE.Object3D();
+const GEO_WALL  = new THREE.BoxGeometry(TILE, 14, TILE);
+const dummy     = new THREE.Object3D();
+const MAT_DWALL = new THREE.MeshLambertMaterial({ color: COLOR.DWALL });
 
-const TILE_MAT = {
-  [T.DEEP]:   new THREE.MeshLambertMaterial({ color: COLOR.DEEP   }),
-  [T.WATER]:  new THREE.MeshLambertMaterial({ color: COLOR.WATER  }),
-  [T.SAND]:   new THREE.MeshLambertMaterial({ color: COLOR.SAND   }),
-  [T.GRASS]:  new THREE.MeshLambertMaterial({ color: COLOR.GRASS  }),
-  [T.FOREST]: new THREE.MeshLambertMaterial({ color: COLOR.FOREST }),
-  [T.MOUND]:  new THREE.MeshLambertMaterial({ color: COLOR.MOUND  }),
-  [T.DFLOOR]: new THREE.MeshLambertMaterial({ color: COLOR.DFLOOR }),
-  [T.DWALL]:  new THREE.MeshLambertMaterial({ color: COLOR.DWALL  }),
-  [T.PATH]:   new THREE.MeshLambertMaterial({ color: COLOR.PATH   }),
+// Biome color per tile type (used for vertex-colored terrain mesh)
+const BIOME_HEX = {
+  [T.DEEP]:   COLOR.DEEP,   [T.WATER]:  COLOR.WATER,  [T.SAND]:   COLOR.SAND,
+  [T.GRASS]:  COLOR.GRASS,  [T.FOREST]: COLOR.FOREST, [T.MOUND]:  COLOR.MOUND,
+  [T.DFLOOR]: COLOR.DFLOOR, [T.DWALL]:  COLOR.DFLOOR, [T.PATH]:   COLOR.PATH,
 };
+function hexToRgb(hex) {
+  return [(hex >> 16 & 255) / 255, (hex >> 8 & 255) / 255, (hex & 255) / 255];
+}
 
 function buildScene() {
-  // ── Tiles (InstancedMesh per type) ──────────────────────────
-  const count = {};
-  for (let z = 0; z < WORLD; z++)
-    for (let x = 0; x < WORLD; x++)
-      count[worldMap[z][x]] = (count[worldMap[z][x]] || 0) + 1;
+  // ── Smooth terrain mesh (vertex-colored BufferGeometry) ──────
+  const V = WORLD + 1; // vertices per side
+  const positions = new Float32Array(V * V * 3);
+  const colors    = new Float32Array(V * V * 3);
+  const indices   = [];
 
-  const imeshes = {}, iidx = {};
-  for (const [tStr, n] of Object.entries(count)) {
-    const t = +tStr;
-    const geo = t === T.DWALL ? GEO_WALL : GEO_FLOOR;
-    const im = new THREE.InstancedMesh(geo, TILE_MAT[t], n);
-    im.receiveShadow = true;
-    im.castShadow    = (t === T.DWALL || t === T.MOUND);
-    imeshes[t] = im; iidx[t] = 0;
-    scene.add(im);
-  }
-
-  for (let z = 0; z < WORLD; z++) {
-    for (let x = 0; x < WORLD; x++) {
-      const t = worldMap[z][x];
-      const h = heightMap[z][x];
-      // Center pillar so top surface = h (floor) or h+3.5 (wall)
-      const y = (t === T.DWALL) ? h - 3.5 : h - 5;
-      dummy.position.set(x * TILE + TILE/2, y, z * TILE + TILE/2);
-      dummy.rotation.set(0, 0, 0);
-      dummy.scale.set(1, 1, 1);
-      dummy.updateMatrix();
-      imeshes[t].setMatrixAt(iidx[t]++, dummy.matrix);
+  for (let iz = 0; iz < V; iz++) {
+    for (let ix = 0; ix < V; ix++) {
+      const vi = iz * V + ix;
+      // Average height + color from the 4 tiles that share this corner
+      let sumH = 0, sumR = 0, sumG = 0, sumB = 0, cnt = 0;
+      for (const [tz, tx] of [[iz-1,ix-1],[iz-1,ix],[iz,ix-1],[iz,ix]]) {
+        if (tz < 0 || tz >= WORLD || tx < 0 || tx >= WORLD) continue;
+        const t  = worldMap[tz][tx];
+        const h  = (t === T.DWALL) ? 0 : heightMap[tz][tx];
+        const [r, g, b] = hexToRgb(BIOME_HEX[t] ?? COLOR.GRASS);
+        sumH += h; sumR += r; sumG += g; sumB += b; cnt++;
+      }
+      if (cnt === 0) cnt = 1;
+      positions[vi*3]   = ix * TILE;
+      positions[vi*3+1] = sumH / cnt;
+      positions[vi*3+2] = iz * TILE;
+      colors[vi*3]   = sumR / cnt;
+      colors[vi*3+1] = sumG / cnt;
+      colors[vi*3+2] = sumB / cnt;
     }
   }
-  for (const im of Object.values(imeshes)) im.instanceMatrix.needsUpdate = true;
+  // Two triangles per tile quad
+  for (let iz = 0; iz < WORLD; iz++) {
+    for (let ix = 0; ix < WORLD; ix++) {
+      const tl = iz*V+ix, tr = tl+1, bl = tl+V, br = bl+1;
+      indices.push(tl, bl, tr,  tr, bl, br);
+    }
+  }
+  const terrainGeo = new THREE.BufferGeometry();
+  terrainGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  terrainGeo.setAttribute('color',    new THREE.BufferAttribute(colors,    3));
+  terrainGeo.setIndex(indices);
+  terrainGeo.computeVertexNormals();
+  const terrainMesh = new THREE.Mesh(
+    terrainGeo, new THREE.MeshLambertMaterial({ vertexColors: true })
+  );
+  terrainMesh.receiveShadow = true;
+  scene.add(terrainMesh);
+
+  // ── Water surface (animated wave mesh) ──────────────────────
+  waterMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(WORLD * TILE, WORLD * TILE, 32, 32),
+    new THREE.MeshLambertMaterial({ color: COLOR.WATER, transparent: true, opacity: 0.78 })
+  );
+  waterMesh.rotation.x = -Math.PI / 2;
+  waterMesh.position.set(WORLD * TILE / 2, -0.10, WORLD * TILE / 2);
+  scene.add(waterMesh);
+  // Save base XY (geo-space) for per-vertex wave displacement
+  { const wp = waterMesh.geometry.attributes.position;
+    wBaseX = new Float32Array(wp.count);
+    wBaseY = new Float32Array(wp.count);
+    for (let i = 0; i < wp.count; i++) { wBaseX[i] = wp.getX(i); wBaseY[i] = wp.getY(i); } }
+
+  // ── Shoreline foam ───────────────────────────────────────────
+  const LAND_T = new Set([T.GRASS, T.SAND, T.PATH, T.MOUND, T.FOREST, T.DFLOOR, T.DWALL]);
+  const foamTiles = [];
+  for (let z = 0; z < WORLD; z++)
+    for (let x = 0; x < WORLD; x++) {
+      if (worldMap[z][x] !== T.WATER) continue;
+      if ([[z-1,x],[z+1,x],[z,x-1],[z,x+1]].some(
+            ([tz,tx]) => tz>=0&&tz<WORLD&&tx>=0&&tx<WORLD && LAND_T.has(worldMap[tz][tx])))
+        foamTiles.push([x, z]);
+    }
+  if (foamTiles.length) {
+    foamMat = new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 });
+    const foamGeo = new THREE.PlaneGeometry(TILE * 0.9, TILE * 0.9);
+    const foamIM  = new THREE.InstancedMesh(foamGeo, foamMat, foamTiles.length);
+    foamTiles.forEach(([x, z], i) => {
+      dummy.position.set(x * TILE + TILE/2, -0.06, z * TILE + TILE/2);
+      dummy.rotation.set(-Math.PI / 2, 0, 0);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      foamIM.setMatrixAt(i, dummy.matrix);
+    });
+    foamIM.instanceMatrix.needsUpdate = true;
+    scene.add(foamIM);
+  }
+
+  // ── DWALL boxes (InstancedMesh) ──────────────────────────────
+  const dwalls = [];
+  for (let z = 0; z < WORLD; z++)
+    for (let x = 0; x < WORLD; x++)
+      if (worldMap[z][x] === T.DWALL) dwalls.push([x, z]);
+  if (dwalls.length) {
+    const wallIM = new THREE.InstancedMesh(GEO_WALL, MAT_DWALL, dwalls.length);
+    wallIM.castShadow = wallIM.receiveShadow = true;
+    dwalls.forEach(([x, z], i) => {
+      dummy.position.set(x * TILE + TILE/2, -3.5, z * TILE + TILE/2);
+      dummy.rotation.set(0, 0, 0); dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      wallIM.setMatrixAt(i, dummy.matrix);
+    });
+    wallIM.instanceMatrix.needsUpdate = true;
+    scene.add(wallIM);
+  }
 
   // ── Trees — round, bushy LTTP/Wind-Waker style ───────────────
   if (treeList.length) {
@@ -425,7 +490,7 @@ function buildScene() {
     });
     for (const [x, z] of starList) {
       const mesh = new THREE.Mesh(starGeo, starMat);
-      const baseY = heightMap[z][x] + 0.9;
+      const baseY = groundAt(x * TILE + TILE/2, z * TILE + TILE/2) + 0.9;
       mesh.position.set(x * TILE + TILE/2, baseY, z * TILE + TILE/2);
       mesh.castShadow = true;
       scene.add(mesh);
@@ -673,16 +738,34 @@ for (let i = 0; i < 2; i++) {
 // ─────────────────────────────────────────────────────────────
 // MOVEMENT + COLLISION + TERRAIN
 // ─────────────────────────────────────────────────────────────
-const SOLID = new Set([T.DWALL, T.WATER, T.DEEP]);
+const SOLID = new Set([T.DWALL, T.DEEP]);
 let stepTimer = 0;
 
 function tileAt(wx, wz) {
   const tx = Math.floor(wx / TILE), tz = Math.floor(wz / TILE);
   return worldMap[tz]?.[tx] ?? T.DEEP;
 }
+// Mesh vertex height — same averaging logic as the terrain BufferGeometry
+function vertexH(ix, iz) {
+  let sumH = 0, cnt = 0;
+  for (const [tz, tx] of [[iz-1,ix-1],[iz-1,ix],[iz,ix-1],[iz,ix]]) {
+    if (tz < 0 || tz >= WORLD || tx < 0 || tx >= WORLD) continue;
+    const t = worldMap[tz][tx];
+    sumH += (t === T.DWALL) ? 0 : (heightMap[tz][tx] ?? 0);
+    cnt++;
+  }
+  return cnt ? sumH / cnt : 0;
+}
+// Bilinear interpolation of vertex heights — matches visible terrain surface
 function groundAt(wx, wz) {
   const tx = Math.floor(wx / TILE), tz = Math.floor(wz / TILE);
-  return heightMap[tz]?.[tx] ?? 0;
+  if (tz < 0 || tz >= WORLD || tx < 0 || tx >= WORLD) return 0;
+  const fx = (wx - tx * TILE) / TILE;
+  const fz = (wz - tz * TILE) / TILE;
+  return vertexH(tx,   tz  ) * (1-fx) * (1-fz)
+       + vertexH(tx+1, tz  ) *    fx  * (1-fz)
+       + vertexH(tx,   tz+1) * (1-fx) *    fz
+       + vertexH(tx+1, tz+1) *    fx  *    fz;
 }
 
 function move(dt) {
@@ -713,8 +796,12 @@ function move(dt) {
     const prevX = rig.position.x, prevZ = rig.position.z;
     const maxW  = (WORLD - 1) * TILE;
 
-    rig.position.x = Math.max(1, Math.min(maxW, rig.position.x + dir.x * SPEED * dt));
-    rig.position.z = Math.max(1, Math.min(maxW, rig.position.z + dir.z * SPEED * dt));
+    // Swim at half speed in shallow water
+    const inWater = tileAt(rig.position.x, rig.position.z) === T.WATER;
+    const spd = inWater ? SPEED * 0.5 : SPEED;
+
+    rig.position.x = Math.max(1, Math.min(maxW, rig.position.x + dir.x * spd * dt));
+    rig.position.z = Math.max(1, Math.min(maxW, rig.position.z + dir.z * spd * dt));
 
     // Wall collision — push back if solid tile
     if (SOLID.has(tileAt(rig.position.x, rig.position.z))) {
@@ -854,13 +941,24 @@ function createEnemy(gx, gz) {
     g.add(eye, pupil);
   }
 
-  const wy = heightMap[gz]?.[gx] ?? 0;
+  const wy = groundAt(gx * TILE + TILE/2, gz * TILE + TILE/2);
   g.position.set(gx * TILE + TILE/2, wy, gz * TILE + TILE/2);
   scene.add(g);
 
   return {
-    mesh: g, hp: 3, hitCooldown: 0, attackTimer: 0, dead: false, deathT: 0,
-    spawnX: gx * TILE + TILE/2, spawnZ: gz * TILE + TILE/2, aggroed: false
+    mesh: g, hp: 3, hitCooldown: 0, dead: false, deathT: 0,
+    spawnX: gx * TILE + TILE/2, spawnZ: gz * TILE + TILE/2, aggroed: false,
+    // Patrol
+    patrolTarget: null,
+    patrolPause:  hash(gx, gz, worldSeed + 44) * 1.5,
+    patrolStep:   Math.floor(hash(gx, gz, worldSeed + 45) * 99),
+    // Lunge-attack cycle  ('cooldown' | 'wait' | 'lunge' | 'retreat')
+    lungePhase:   'cooldown',
+    lungeT:       hash(gx, gz, worldSeed + 41) * 1.2,  // stagger first attack
+    lungeDir:     new THREE.Vector3(),
+    lungeDamaged: false,
+    // Per-enemy animation phase offset
+    phase: hash(gx, gz, worldSeed + 42) * Math.PI * 2,
   };
 }
 
@@ -875,7 +973,6 @@ function spawnEnemies() {
   }
 }
 
-const _ep = new THREE.Vector3();
 function updateEnemies(dt) {
   const px = rig.position.x, pz = rig.position.z;
 
@@ -888,74 +985,152 @@ function updateEnemies(dt) {
     swordPrevPos.copy(swordTipWorld);
   }
 
+  const LUNGE_RANGE = 2.6; // distance at which lunge cycle begins
+
   for (const e of enemies) {
     if (e.dead) {
       e.deathT += dt;
-      const s = Math.max(0, 1 - e.deathT / 0.35);
-      e.mesh.scale.setScalar(s);
+      e.mesh.scale.setScalar(Math.max(0, 1 - e.deathT / 0.35));
       if (e.deathT > 0.4) scene.remove(e.mesh);
       continue;
     }
 
-    // Aggro / retreat logic
-    _ep.set(px, e.mesh.position.y, pz);
-    const dist = e.mesh.position.distanceTo(_ep);
+    // Horizontal distance to player
+    const dx = px - e.mesh.position.x, dz = pz - e.mesh.position.z;
+    const dist = Math.sqrt(dx * dx + dz * dz);
 
-    if (!e.aggroed && dist < 8)  e.aggroed = true;
-    if (e.aggroed  && dist > 12) e.aggroed = false;
+    // Aggro transitions
+    if (!e.aggroed && dist < 8)  { e.aggroed = true; e.patrolTarget = null; }
+    if (e.aggroed  && dist > 12) {
+      e.aggroed = false;
+      e.lungePhase = 'cooldown'; e.lungeT = 0.4;
+      e.mesh.rotation.x = 0; e.mesh.rotation.z = 0;
+    }
+
+    // Ground snap
+    e.mesh.position.y = groundAt(e.mesh.position.x, e.mesh.position.z);
+    const body = e.mesh.children[0]; // body sphere
 
     if (e.aggroed) {
-      // Chase player
-      const spd = 2.2 * dt;
-      e.mesh.position.x += (px - e.mesh.position.x) / dist * spd;
-      e.mesh.position.z += (pz - e.mesh.position.z) / dist * spd;
-      e.mesh.position.y = groundAt(e.mesh.position.x, e.mesh.position.z);
-      e.mesh.lookAt(px, e.mesh.position.y, pz);
+      // ── AGGROED ──────────────────────────────────────────────
+      if (dist > LUNGE_RANGE) {
+        // Chase — walk towards player with bounce
+        const spd = 2.2 * dt;
+        e.mesh.position.x += dx / dist * spd;
+        e.mesh.position.z += dz / dist * spd;
+        e.mesh.lookAt(px, e.mesh.position.y, pz);
+        e.mesh.rotation.x = 0; e.mesh.rotation.z = 0;
+        body.position.y = 0.3 + Math.abs(Math.sin(elapsed * 9 + e.phase)) * 0.09;
+        // Reset lunge timer while chasing so it's fresh when in range
+        if (e.lungePhase !== 'cooldown') { e.lungePhase = 'cooldown'; e.lungeT = 0.3; }
+      } else {
+        // In lunge range — run lunge cycle
+        e.lungeT -= dt;
+
+        if (e.lungePhase === 'cooldown') {
+          // Face player, idle sway
+          e.mesh.lookAt(px, e.mesh.position.y, pz);
+          e.mesh.rotation.x = 0;
+          body.position.y = 0.3 + Math.sin(elapsed * 5 + e.phase) * 0.03;
+          if (e.lungeT <= 0) { e.lungePhase = 'wait'; e.lungeT = 0.45; }
+
+        } else if (e.lungePhase === 'wait') {
+          // Wind-up: rapid head bob, lean forward slightly
+          e.mesh.lookAt(px, e.mesh.position.y, pz);
+          const bob = Math.sin(elapsed * 14 + e.phase);
+          body.position.y = 0.3 + bob * 0.07;
+          e.mesh.rotation.x = -0.15 + bob * 0.05;
+          if (e.lungeT <= 0) {
+            // LAUNCH
+            e.lungePhase = 'lunge';
+            e.lungeT = 0.22;
+            e.lungeDamaged = false;
+            e.lungeDir.set(dx, 0, dz).normalize();
+          }
+
+        } else if (e.lungePhase === 'lunge') {
+          // Dash forward, tilted
+          e.mesh.rotation.x = -0.55;
+          body.position.y = 0.3;
+          e.mesh.position.x += e.lungeDir.x * 7 * dt;
+          e.mesh.position.z += e.lungeDir.z * 7 * dt;
+          // Deal damage once per lunge on contact
+          if (!e.lungeDamaged && dist < 1.4) {
+            e.lungeDamaged = true;
+            playerHP = Math.max(0, playerHP - 1);
+            updateHPBar();
+          }
+          if (e.lungeT <= 0) {
+            e.lungePhase = 'retreat';
+            e.lungeT = 0.38;
+            e.lungeDir.negate(); // reverse = retreat direction
+            e.mesh.rotation.x = 0;
+          }
+
+        } else if (e.lungePhase === 'retreat') {
+          // Back away quickly
+          e.mesh.position.x += e.lungeDir.x * 4.5 * dt;
+          e.mesh.position.z += e.lungeDir.z * 4.5 * dt;
+          body.position.y = 0.3;
+          if (e.lungeT <= 0) {
+            e.lungePhase = 'cooldown';
+            // Slightly random cooldown per enemy
+            e.lungeT = 0.5 + hash(e.spawnX, e.spawnZ, ++e.patrolStep) * 0.5;
+          }
+        }
+      }
+
     } else {
-      // Return to spawn point
-      const dsx = e.spawnX - e.mesh.position.x;
-      const dsz = e.spawnZ - e.mesh.position.z;
-      const dSpawn = Math.sqrt(dsx * dsx + dsz * dsz);
-      if (dSpawn > 0.5) {
-        const spd = 1.5 * dt;
-        e.mesh.position.x += dsx / dSpawn * spd;
-        e.mesh.position.z += dsz / dSpawn * spd;
-        e.mesh.position.y = groundAt(e.mesh.position.x, e.mesh.position.z);
+      // ── PATROL ───────────────────────────────────────────────
+      e.mesh.rotation.x = 0; e.mesh.rotation.z = 0;
+
+      if (e.patrolPause > 0) {
+        // Waiting — gentle idle sway
+        e.patrolPause -= dt;
+        body.position.y = 0.3 + Math.sin(elapsed * 2.5 + e.phase) * 0.02;
+        e.mesh.rotation.z = Math.sin(elapsed * 1.8 + e.phase) * 0.04;
+      } else {
+        if (!e.patrolTarget) {
+          // Pick a new point near spawn using deterministic hash
+          const a = hash(e.spawnX, e.spawnZ, ++e.patrolStep) * Math.PI * 2;
+          const r = 2 + hash(e.spawnZ, e.patrolStep, e.spawnX) * 4;
+          e.patrolTarget = {
+            x: Math.max(TILE, Math.min((WORLD-1)*TILE, e.spawnX + Math.cos(a) * r)),
+            z: Math.max(TILE, Math.min((WORLD-1)*TILE, e.spawnZ + Math.sin(a) * r)),
+          };
+        }
+        const ptdx = e.patrolTarget.x - e.mesh.position.x;
+        const ptdz = e.patrolTarget.z - e.mesh.position.z;
+        const ptDist = Math.sqrt(ptdx * ptdx + ptdz * ptdz);
+        if (ptDist > 0.35) {
+          const spd = 1.3 * dt;
+          e.mesh.position.x += ptdx / ptDist * spd;
+          e.mesh.position.z += ptdz / ptDist * spd;
+          e.mesh.lookAt(e.patrolTarget.x, e.mesh.position.y, e.patrolTarget.z);
+          e.mesh.rotation.z = 0;
+          body.position.y = 0.3 + Math.abs(Math.sin(elapsed * 5 + e.phase)) * 0.06;
+        } else {
+          // Arrived — wait before next point
+          e.patrolTarget = null;
+          e.patrolPause = 1.0 + hash(e.patrolStep, e.spawnX, e.spawnZ) * 1.5;
+        }
       }
     }
 
-    // Attack player (only when aggroed)
-    if (dist < 1.5 && e.aggroed) {
-      e.attackTimer += dt;
-      if (e.attackTimer >= 1.5) {
-        e.attackTimer = 0;
-        playerHP = Math.max(0, playerHP - 1);
-        updateHPBar();
-      }
-    } else {
-      e.attackTimer = 0;
-    }
-
-    // Sword hit — tip within 1.2m and sword moving fast enough
+    // ── Sword hit ──────────────────────────────────────────────
     e.hitCooldown = Math.max(0, e.hitCooldown - dt);
     if (hasSword && e.hitCooldown === 0) {
       const tipDist = swordTipWorld.distanceTo(e.mesh.position);
       if (tipDist < 1.2 && swordVel > 1.5) {
-        e.hp--;
-        e.hitCooldown = 0.4;
-        sfx.hit();
-        // Flash red
+        e.hp--; e.hitCooldown = 0.4; sfx.hit();
         e.mesh.children[0].material = ENEMY_MAT_DMGD;
         setTimeout(() => { if (!e.dead) e.mesh.children[0].material = ENEMY_MAT_BODY; }, 200);
         if (e.hp <= 0) { e.dead = true; sfx.death(); }
       }
     }
-
     // Space key hit (desktop)
     if (keys['Space'] && dist < 2.5 && e.hitCooldown === 0) {
-      e.hp--;
-      e.hitCooldown = 0.5;
-      sfx.hit();
+      e.hp--; e.hitCooldown = 0.5; sfx.hit();
       if (e.hp <= 0) { e.dead = true; sfx.death(); }
     }
   }
@@ -969,57 +1144,43 @@ let gameEnded = false;
 function showGameOver() {
   if (gameEnded) return;
   gameEnded = true;
-  renderer.setAnimationLoop(null);
+  // HTML overlay (desktop)
   const el = document.createElement('div');
-  el.style.cssText = [
-    'position:fixed', 'inset:0',
-    'background:rgba(0,0,0,.85)',
-    'display:flex', 'flex-direction:column',
-    'align-items:center', 'justify-content:center',
-    'z-index:200', 'color:#fff', 'font-family:monospace',
-  ].join(';');
+  el.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:200;color:#fff;font-family:monospace';
   el.innerHTML = `
     <div style="font-size:52px;color:#ff4444;margin-bottom:16px;text-shadow:0 0 20px #f00">GAME OVER</div>
     <div style="font-size:20px;margin-bottom:32px;opacity:.8">Fuiste derrotado...</div>
-    <button onclick="location.reload()"
-      style="font-size:18px;padding:12px 36px;background:#ff4444;color:#fff;
-             border:none;border-radius:8px;cursor:pointer;letter-spacing:1px">
-      ▶ Jugar de nuevo
-    </button>
+    <button onclick="location.reload()" style="font-size:18px;padding:12px 36px;background:#ff4444;color:#fff;border:none;border-radius:8px;cursor:pointer">▶ Jugar de nuevo</button>
   `;
   document.body.appendChild(el);
+  // 3D overlay visible inside VR headset
+  show3DOverlay('GAME OVER', 'Fuiste derrotado...', '#ff4444');
 }
 
 function showVictory() {
   if (gameEnded) return;
   gameEnded = true;
-  renderer.setAnimationLoop(null);
+  // HTML overlay (desktop)
   const el = document.createElement('div');
-  el.style.cssText = [
-    'position:fixed', 'inset:0',
-    'background:rgba(0,0,0,.85)',
-    'display:flex', 'flex-direction:column',
-    'align-items:center', 'justify-content:center',
-    'z-index:200', 'color:#fff', 'font-family:monospace',
-  ].join(';');
+  el.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:200;color:#fff;font-family:monospace';
   el.innerHTML = `
-    <div style="font-size:52px;color:#ffd700;margin-bottom:16px;text-shadow:0 0 20px #fa0">&#9733; VICTORIA &#9733;</div>
+    <div style="font-size:52px;color:#ffd700;margin-bottom:16px;text-shadow:0 0 20px #fa0">★ VICTORIA ★</div>
     <div style="font-size:20px;margin-bottom:8px;opacity:.8">¡Recolectaste todas las estrellas!</div>
     <div style="font-size:15px;margin-bottom:32px;color:#ffd700;opacity:.7">${stars.length} / ${stars.length} estrellas</div>
-    <button onclick="location.reload()"
-      style="font-size:18px;padding:12px 36px;background:#ffd700;color:#000;
-             border:none;border-radius:8px;cursor:pointer;letter-spacing:1px">
-      ▶ Jugar de nuevo
-    </button>
+    <button onclick="location.reload()" style="font-size:18px;padding:12px 36px;background:#ffd700;color:#000;border:none;border-radius:8px;cursor:pointer">▶ Jugar de nuevo</button>
   `;
   document.body.appendChild(el);
+  // 3D overlay visible inside VR headset
+  show3DOverlay('VICTORIA', '¡Recolectaste todas las estrellas!', '#ffd700');
 }
 
 let starEl;
 function updateStarCounter() {
-  if (!starEl) return;
-  const collected = stars.filter(s => s.collected).length;
-  starEl.textContent = '\u2605 ' + collected + ' / ' + stars.length;
+  if (starEl) {
+    const collected = stars.filter(s => s.collected).length;
+    starEl.textContent = '\u2605 ' + collected + ' / ' + stars.length;
+  }
+  drawHUD3d();
 }
 
 function checkStarCollection() {
@@ -1111,6 +1272,10 @@ let isRaining = false;
 let rainMesh = null;
 let rainTimer = 30 + Math.random() * 60; // first rain in 30-90s
 
+// Water animation refs (set in buildScene)
+let waterMesh = null, wBaseX = null, wBaseY = null;
+let foamMat   = null;
+
 const RAIN_COUNT = 1800;
 const rainPositions = new Float32Array(RAIN_COUNT * 3);
 const rainVelocities = new Float32Array(RAIN_COUNT);
@@ -1140,6 +1305,22 @@ function stopRain() {
   rainMesh.geometry.dispose();
   rainMesh = null;
   isRaining = false;
+}
+
+function updateWater(t) {
+  if (!waterMesh || !wBaseX) return;
+  const pos = waterMesh.geometry.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    // geo-space Z = world Y (height) after rotation.x = -PI/2
+    pos.setZ(i,
+      Math.sin(wBaseX[i] * 0.18 + t * 1.6) * 0.12 +
+      Math.cos(wBaseY[i] * 0.15 + t * 1.2) * 0.09
+    );
+  }
+  pos.needsUpdate = true;
+  waterMesh.geometry.computeVertexNormals();
+  // Pulse foam opacity
+  if (foamMat) foamMat.opacity = 0.30 + Math.sin(t * 2.8) * 0.22;
 }
 
 function updateRain(dt) {
@@ -1222,15 +1403,68 @@ function drawMinimap() {
 // HUD
 // ─────────────────────────────────────────────────────────────
 let hpBarEl;
+// 3D HUD canvas — works in desktop and VR
+let hudCtx3d = null, hudTex3d = null;
+
+function drawHUD3d() {
+  if (!hudCtx3d) return;
+  const ctx = hudCtx3d;
+  ctx.clearRect(0, 0, 256, 64);
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  if (ctx.roundRect) { ctx.roundRect(2, 2, 252, 60, 10); ctx.fill(); }
+  else { ctx.fillRect(2, 2, 252, 60); }
+  ctx.font = 'bold 28px sans-serif';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i < 5; i++) {
+    ctx.fillStyle = i < playerHP ? '#ff4444' : '#442222';
+    ctx.fillText('♥', 10 + i * 44, 32);
+  }
+  const col = stars.filter(s => s.collected).length;
+  ctx.fillStyle = '#ffd700';
+  ctx.font = 'bold 20px sans-serif';
+  ctx.fillText('★ ' + col + ' / ' + stars.length, 240, 32);
+  if (hudTex3d) hudTex3d.needsUpdate = true;
+}
 
 function updateHPBar() {
-  if (!hpBarEl) return;
-  hpBarEl.textContent = '♥'.repeat(playerHP) + '♡'.repeat(Math.max(0, 5 - playerHP));
-  hpBarEl.style.color = playerHP <= 1 ? '#ff4444' : '#ff8888';
+  if (hpBarEl) {
+    hpBarEl.textContent = '♥'.repeat(playerHP) + '♡'.repeat(Math.max(0, 5 - playerHP));
+    hpBarEl.style.color = playerHP <= 1 ? '#ff4444' : '#ff8888';
+  }
+  drawHUD3d();
   if (playerHP === 0) showGameOver();
 }
 
+// Floating 3D overlay — attached to camera so it works in VR
+function show3DOverlay(titleText, subText, titleColor) {
+  const oc = document.createElement('canvas');
+  oc.width = 512; oc.height = 256;
+  const ctx = oc.getContext('2d');
+  ctx.fillStyle = 'rgba(0,0,0,0.88)';
+  ctx.fillRect(0, 0, 512, 256);
+  ctx.fillStyle = titleColor;
+  ctx.font = 'bold 72px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(titleText, 256, 88);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '30px sans-serif';
+  ctx.fillText(subText, 256, 158);
+  ctx.fillStyle = '#aaaaaa';
+  ctx.font = '22px sans-serif';
+  ctx.fillText('Reiniciando en 4s…', 256, 212);
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(1.6, 0.8),
+    new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(oc), transparent: true, depthTest: false })
+  );
+  mesh.position.set(0, 0.05, -1.5);
+  mesh.renderOrder = 1000;
+  camera.add(mesh);
+  setTimeout(() => location.reload(), 4000);
+}
+
 function buildHUD() {
+  // HTML overlay (desktop)
   const el = document.createElement('div');
   el.style.cssText = [
     'position:fixed', 'top:12px', 'left:12px',
@@ -1251,6 +1485,20 @@ function buildHUD() {
   document.body.appendChild(el);
   hpBarEl = document.getElementById('hp');
   starEl  = document.getElementById('stars');
+
+  // 3D HUD — visible in VR headset, attached to camera
+  const hc = document.createElement('canvas');
+  hc.width = 256; hc.height = 64;
+  hudCtx3d = hc.getContext('2d');
+  hudTex3d = new THREE.CanvasTexture(hc);
+  const hm = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.5, 0.125),
+    new THREE.MeshBasicMaterial({ map: hudTex3d, transparent: true, depthTest: false })
+  );
+  hm.position.set(0, -0.28, -0.7);
+  hm.renderOrder = 999;
+  camera.add(hm);
+  drawHUD3d();
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1272,11 +1520,14 @@ renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
   elapsed += dt;
 
-  move(dt);
-  updateEnemies(dt);
-  checkStarCollection();
-  updateDayNight(dt);
-  updateRain(dt);
+  if (!gameEnded) {
+    move(dt);
+    updateEnemies(dt);
+    checkStarCollection();
+    updateDayNight(dt);
+    updateRain(dt);
+  }
+  updateWater(elapsed);
   drawMinimap();
 
   // Animate uncollected stars (bob + spin)
