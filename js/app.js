@@ -71,9 +71,9 @@ let heightMap = [];
 let treeList  = [], rockList = [], starList = [];
 let worldSeed = 0;
 let stars = [];
-const cloudGroups = [];
-const pushRocks    = [];
-const wallRockData = []; // { imRef, idx, pos, knocked } — lazy physics activation
+
+const pushRocks       = [];
+const towerObstacles  = []; // { x, z, r } — colisión cilíndrica de torres
 let rockGeo = null, rockMat = null; // set after GLB load
 let treeLists = [[], [], []];             // [forestList, fieldList, mountainList]
 const treePartsList = [null, null, null]; // [{geo,mat}[]] per model — preserves multi-material
@@ -115,6 +115,9 @@ function generateMap() {
 
   // Zora's Domain (water/ice, northeast)
   paintRect(46, 2, 62, 16, T.WATER);
+
+  // Meseta NE — anula parte de Zora's Domain para el castillo de montaña
+  paintRect(40, 2, 60, 12, T.MOUND);
 
   // ── CENTER ────────────────────────────────────────────────
   // Eastern mountains / Eastern Palace area (right side)
@@ -198,11 +201,11 @@ function generateMap() {
     }
   }
 
-  // ── Plateau pre-blur — meseta amplia para el castillo de Death Mountain ──
+  // ── Plateau pre-blur — meseta amplia NE para el castillo de Death Mountain ──
   const MFORT_H = 14;
-  for (let z = 2; z < 14; z++)
-    for (let x = 19; x < 43; x++)
-      if (worldMap[z][x] === T.MOUND || worldMap[z][x] === T.FOREST)
+  for (let z = 2; z < 12; z++)
+    for (let x = 40; x < 62; x++)
+      if (worldMap[z][x] !== T.DEEP)
         heightMap[z][x] = MFORT_H; // meseta plana antes del blur → pendiente suave al borde
 
   // ── Blur 3 pasadas — pendientes suaves sin acantilados bruscos ──
@@ -225,16 +228,16 @@ function generateMap() {
     heightMap = blurred;
   }
 
-  // ── Castillo Montaña — castle grande en la meseta (14x7 tiles) ──
-  for (let z = 4; z < 11; z++) {
-    for (let x = 24; x < 38; x++) {
-      const wall = z === 4 || z === 10 || x === 24 || x === 37;
+  // ── Castillo Montaña — castle NE en la meseta (14x7 tiles) ──
+  for (let z = 3; z < 10; z++) {
+    for (let x = 44; x < 58; x++) {
+      const wall = z === 3 || z === 9 || x === 44 || x === 57;
       worldMap[z][x] = wall ? T.DWALL : T.DFLOOR;
       heightMap[z][x] = MFORT_H; // restaurar tras blur
     }
   }
-  worldMap[10][30] = T.PATH;
-  worldMap[10][31] = T.PATH; // puerta sur (2 tiles de ancho)
+  worldMap[9][50] = T.PATH;
+  worldMap[9][51] = T.PATH; // puerta sur (2 tiles de ancho)
 
   // ── TREE / ROCK / STAR LISTS ─────────────────────────────
   treeList = []; rockList = []; starList = [];
@@ -264,7 +267,7 @@ function generateMap() {
         treeLists[0].push([x, z]);
 
       if ((t === T.MOUND || t === T.GRASS) && hash(x, z, worldSeed+2) > 0.87) rockList.push([x, z]);
-      if (starList.length < 10 && STAR_TILES.has(t) && hash(x, z, worldSeed+99) > 0.91) starList.push([x, z]);
+      if (starList.length < 30 && STAR_TILES.has(t) && hash(x, z, worldSeed+99) > 0.91) starList.push([x, z]);
     }
   }
 }
@@ -281,6 +284,11 @@ function carvePaths() {
   for (let z = 2; z < 12; z++) {
     if (SAFE(worldMap[z][30])) worldMap[z][30] = T.PATH;
   }
+  // Path east → Mountain Castle NE (z=10, x=31 to x=51)
+  for (let x = 31; x <= 51; x++)
+    if (SAFE(worldMap[10][x])) worldMap[10][x] = T.PATH;
+  // Path north to castle south gate (x=50, z=9-10)
+  if (SAFE(worldMap[9][50])) worldMap[9][50] = T.PATH;
   // E-W road through central Hyrule
   for (let x = 6; x < 56; x++) {
     if (SAFE(worldMap[34][x])) worldMap[34][x] = T.PATH;
@@ -526,8 +534,6 @@ function buildScene() {
           else                   dummy.scale.setScalar(WSCALE);
           dummy.updateMatrix();
           wallIM.setMatrixAt(wi, dummy.matrix);
-          wallRockData.push({ imRef: wallIM, idx: wi,
-            pos: new THREE.Vector3(px, py, pz), knocked: false });
           wi++;
         }
       }
@@ -708,27 +714,6 @@ function buildScene() {
       pl.position.set(x*TILE + TILE/2, 1.9, z*TILE + TILE/2);
       scene.add(pl);
     });
-  }
-
-  // ── Clouds ───────────────────────────────────────────────────
-  const cloudMat = new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.88 });
-  for (let i = 0; i < 18; i++) {
-    const g = new THREE.Group();
-    const n = 3 + Math.floor(hash(i, 0, worldSeed+11) * 3);
-    for (let j = 0; j < n; j++) {
-      const r = 2 + hash(i, j, worldSeed+12) * 3.5;
-      const blob = new THREE.Mesh(new THREE.SphereGeometry(r, 6, 5), cloudMat);
-      blob.position.set(j * r * 1.3, hash(i, j, worldSeed+13) * 2, 0);
-      g.add(blob);
-    }
-    g.position.set(
-      hash(i, 0, worldSeed+14) * WORLD * TILE,
-      30 + hash(i, 1, worldSeed+15) * 20,
-      hash(i, 2, worldSeed+16) * WORLD * TILE
-    );
-    g.userData.spd = 0.4 + hash(i, 3, worldSeed+17) * 1.2;
-    scene.add(g);
-    cloudGroups.push(g);
   }
 
   // ── Sun sphere ───────────────────────────────────────────────
@@ -1000,6 +985,16 @@ function move(dt) {
     if (SOLID.has(tileAt(rig.position.x, rig.position.z))) {
       rig.position.x = prevX;
       rig.position.z = prevZ;
+    }
+
+    // Tower collision — empuja al jugador fuera del cilindro de cada torre
+    for (const t of towerObstacles) {
+      const tdx = rig.position.x - t.x, tdz = rig.position.z - t.z;
+      const td  = Math.sqrt(tdx * tdx + tdz * tdz);
+      if (td < t.r && td > 0.01) {
+        rig.position.x = t.x + (tdx / td) * t.r;
+        rig.position.z = t.z + (tdz / td) * t.r;
+      }
     }
 
     // Footstep sound
@@ -1344,26 +1339,8 @@ function updateEnemies(dt) {
 // PUSH ROCKS — large boulders with simple physics
 // ─────────────────────────────────────────────────────────────
 const ROCK_SCALE = 5;                    // push rocks son 5x más grandes
-const ROCK_HALF  = 0.34 * ROCK_SCALE;   // 1.70 m (base offset)
 const ROCK_R     = 0.50 * ROCK_SCALE;   // 2.50 m collision radius
 const hearts = [];                       // corazones de vida en el suelo
-
-function knockWallRock(wr, impulseX, impulseZ) {
-  if (wr.knocked) return;
-  wr.knocked = true;
-  // Hide the instanced rock by zeroing its scale
-  const zero = new THREE.Object3D();
-  zero.scale.set(0, 0, 0);
-  zero.updateMatrix();
-  wr.imRef.setMatrixAt(wr.idx, zero.matrix);
-  wr.imRef.instanceMatrix.needsUpdate = true;
-  // Spawn a physics mesh at the same position
-  const mesh = new THREE.Mesh(rockGeo, rockMat);
-  mesh.castShadow = true;
-  mesh.position.copy(wr.pos);
-  scene.add(mesh);
-  pushRocks.push({ mesh, vx: impulseX, vz: impulseZ, hitCooldown: 0.35 });
-}
 
 function spawnPushRocks() {
   if (!rockGeo) return;
@@ -1376,9 +1353,9 @@ function spawnPushRocks() {
         mesh.castShadow = mesh.receiveShadow = true;
         mesh.scale.setScalar(ROCK_SCALE);
         mesh.rotation.y = hash(x, z, worldSeed + 33) * Math.PI * 2;
-        mesh.position.set(wx, groundAt(wx, wz) + ROCK_HALF, wz);
+        mesh.position.set(wx, groundAt(wx, wz), wz);
         scene.add(mesh);
-        pushRocks.push({ mesh, vx: 0, vz: 0, hitCooldown: 0, broken: false });
+        pushRocks.push({ mesh, vx: 0, vz: 0, hitCooldown: 0, broken: false, tipping: false, tipT: 0 });
       }
     }
   }
@@ -1387,58 +1364,74 @@ function spawnPushRocks() {
 function updatePushRocks(dt) {
   const hasSword = !!gripRefs.right;
 
-  // ── Wall rock hit detection ─────────────────────────────────
-  if (hasSword && swordVel > 2 && wallRockData.length) {
-    for (const wr of wallRockData) {
-      if (wr.knocked) continue;
-      const dx = wr.pos.x - swordTipWorld.x;
-      const dz = wr.pos.z - swordTipWorld.z;
-      if (dx * dx + dz * dz < 1.8 * 1.8) {
-        const d = Math.sqrt(dx * dx + dz * dz) || 0.01;
-        const impulse = Math.min(swordVel * 0.25, 7);
-        knockWallRock(wr, dx / d * impulse, dz / d * impulse);
-        sfx.hit();
-        break; // one per frame
-      }
-    }
-  }
-
   if (!pushRocks.length) return;
 
-  // Función que rompe una roca y suelta un corazón
-  function breakRock(r) {
+  // Inicia volcado en la dirección del golpe (dirX, dirZ = vector normalizado desde golpeador)
+  function breakRock(r, dirX, dirZ) {
     if (r.broken) return;
     r.broken = true;
-    scene.remove(r.mesh);
+    r.tipping = true;
+    r.tipT = 0;
+    r.tipDirX = dirX || 1;
+    r.tipDirZ = dirZ || 0;
+    r.mesh.rotation.x = 0; // limpiar rotación acumulada del rodado
+    r.mesh.rotation.z = 0;
+    r.vx = 0; r.vz = 0;
     sfx.hit();
-    // Spawn corazón en la posición de la roca
-    const hMesh = new THREE.Mesh(
-      new THREE.SphereGeometry(0.35, 8, 6),
-      new THREE.MeshLambertMaterial({ color: 0xff2244, emissive: 0xaa0022, emissiveIntensity: 0.7 })
-    );
-    hMesh.position.copy(r.mesh.position);
-    hMesh.position.y = groundAt(r.mesh.position.x, r.mesh.position.z) + 0.6;
-    scene.add(hMesh);
-    hearts.push({ mesh: hMesh, baseY: hMesh.position.y, phase: Math.random() * Math.PI * 2 });
   }
 
   for (const r of pushRocks) {
-    if (r.broken) continue;
+    // Roca completamente eliminada
+    if (r.broken && !r.tipping) continue;
+
+    // Animación de volcado en la dirección del golpe
+    if (r.tipping) {
+      r.tipT += dt;
+      const prog  = Math.min(r.tipT / 0.45, 1);
+      const angle = prog * (Math.PI / 2);
+      // Rotar alrededor del eje perpendicular a la dirección de caída
+      r.mesh.rotation.x = angle * (-r.tipDirZ);
+      r.mesh.rotation.z = angle * (-r.tipDirX);
+      r.mesh.position.y = groundAt(r.mesh.position.x, r.mesh.position.z)
+                          + Math.max(0, (1 - prog) * 0.3);
+      if (prog >= 1) {
+        r.tipping = false;
+        scene.remove(r.mesh);
+        const hMesh = new THREE.Mesh(
+          new THREE.SphereGeometry(0.35, 8, 6),
+          new THREE.MeshLambertMaterial({ color: 0xff2244, emissive: 0xaa0022, emissiveIntensity: 0.7 })
+        );
+        hMesh.position.set(r.mesh.position.x,
+          groundAt(r.mesh.position.x, r.mesh.position.z) + 0.6,
+          r.mesh.position.z);
+        scene.add(hMesh);
+        hearts.push({ mesh: hMesh, baseY: hMesh.position.y, phase: Math.random() * Math.PI * 2 });
+      }
+      continue;
+    }
     r.hitCooldown = Math.max(0, r.hitCooldown - dt);
 
-    // ── Hit detection — rompe la roca al primer golpe ───────────
+    // ── Hit detection — rompe la roca en la dirección del golpe ─
     if (r.hitCooldown === 0) {
-      let hit = false;
+      let hit = false, hdx = 1, hdz = 0;
       if (hasSword) {
         const tipDist = swordTipWorld.distanceTo(r.mesh.position);
-        if (tipDist < ROCK_R && swordVel > 1.5) hit = true;
+        if (tipDist < ROCK_R && swordVel > 1.5) {
+          const d = tipDist || 1;
+          hdx = (r.mesh.position.x - swordTipWorld.x) / d;
+          hdz = (r.mesh.position.z - swordTipWorld.z) / d;
+          hit = true;
+        }
       }
       if (!hit && keys['Space']) {
         const dx = r.mesh.position.x - rig.position.x;
         const dz = r.mesh.position.z - rig.position.z;
-        if (dx * dx + dz * dz < (ROCK_R + 1) * (ROCK_R + 1)) hit = true;
+        const d  = Math.sqrt(dx * dx + dz * dz) || 1;
+        if (dx * dx + dz * dz < (ROCK_R + 1) * (ROCK_R + 1)) {
+          hdx = dx / d; hdz = dz / d; hit = true;
+        }
       }
-      if (hit) { breakRock(r); continue; }
+      if (hit) { breakRock(r, hdx, hdz); continue; }
     }
 
     // Stop when barely moving
@@ -1454,7 +1447,7 @@ function updatePushRocks(dt) {
     if (!SOLID.has(tzn) && tzn !== T.DEEP) r.mesh.position.z = nz; else r.vz *= -0.25;
 
     // ── Ground follow ──────────────────────────────────────────
-    r.mesh.position.y = groundAt(r.mesh.position.x, r.mesh.position.z) + ROCK_HALF;
+    r.mesh.position.y = groundAt(r.mesh.position.x, r.mesh.position.z);
 
     // ── Rolling rotation ───────────────────────────────────────
     r.mesh.rotation.x -= r.vz * dt * 0.55;
@@ -1528,13 +1521,13 @@ function showVictory() {
   el.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:200;color:#fff;font-family:monospace';
   el.innerHTML = `
     <div style="font-size:52px;color:#ffd700;margin-bottom:16px;text-shadow:0 0 20px #fa0">★ VICTORIA ★</div>
-    <div style="font-size:20px;margin-bottom:8px;opacity:.8">¡Recolectaste todas las estrellas!</div>
-    <div style="font-size:15px;margin-bottom:32px;color:#ffd700;opacity:.7">${stars.length} / ${stars.length} estrellas</div>
+    <div style="font-size:20px;margin-bottom:8px;opacity:.8">¡Recolectaste 10 monedas!</div>
+    <div style="font-size:15px;margin-bottom:32px;color:#ffd700;opacity:.7">10 / ${stars.length} monedas</div>
     <button onclick="location.reload()" style="font-size:18px;padding:12px 36px;background:#ffd700;color:#000;border:none;border-radius:8px;cursor:pointer">▶ Jugar de nuevo</button>
   `;
   document.body.appendChild(el);
   // 3D overlay visible inside VR headset
-  show3DOverlay('VICTORIA', '¡Recolectaste todas las estrellas!', '#ffd700');
+  show3DOverlay('VICTORIA', '¡Recolectaste 10 monedas!', '#ffd700');
 }
 
 let starEl;
@@ -1563,7 +1556,7 @@ function checkStarCollection() {
   }
   if (anyNew) {
     updateStarCounter();
-    if (stars.length > 0 && stars.every(s => s.collected)) showVictory();
+    if (stars.filter(s => s.collected).length >= 10) showVictory();
   }
 }
 
@@ -1911,7 +1904,7 @@ renderer.setAnimationLoop(() => {
   for (const s of stars) {
     if (!s.collected) {
       s.mesh.position.y = s.baseY + Math.sin(elapsed * 2.5 + s.phase) * 0.18;
-      s.mesh.rotation.y += dt * 1.8;
+      s.mesh.rotation.x += dt * 1.8; // gira sobre eje X → cara visible al jugador
     }
   }
 
@@ -1930,13 +1923,71 @@ renderer.setAnimationLoop(() => {
     }
   }
 
-  for (const g of cloudGroups) {
-    g.position.x += g.userData.spd * dt;
-    if (g.position.x > WORLD * TILE + 20) g.position.x = -20;
-  }
-
   renderer.render(scene, camera);
 });
+
+// ─────────────────────────────────────────────────────────────
+// ROCK TOWERS — torres cilíndricas de rocas GLB decorativas
+// ─────────────────────────────────────────────────────────────
+function spawnRockTowers() {
+  if (!rockGeo) return;
+  const TOW_SC  = 1.6;                     // escala de cada roca de torre
+  const ROCK_H  = 0.85 * 1.20 * TOW_SC;   // ≈ 1.63 m alto por roca escalada
+  const VALID   = new Set([T.GRASS, T.MOUND, T.SAND]);
+
+  // Recopilar posiciones candidatas (evitar zonas de castillos)
+  const spots = [];
+  for (let z = 4; z < WORLD - 4; z++) {
+    for (let x = 4; x < WORLD - 4; x++) {
+      if (!VALID.has(worldMap[z][x])) continue;
+      if (hash(x, z, worldSeed + 777) <= 0.988) continue;
+      let nearCastle = false;
+      for (let dz = -3; dz <= 3 && !nearCastle; dz++)
+        for (let dx = -3; dx <= 3 && !nearCastle; dx++) {
+          const t = worldMap[z + dz]?.[x + dx];
+          if (t === T.DWALL || t === T.DFLOOR) nearCastle = true;
+        }
+      if (!nearCastle) spots.push([x, z]);
+    }
+  }
+  if (!spots.length) return;
+
+  // Calcular total de rocas a instanciar
+  const towerData = spots.map(([x, z]) => ({
+    x, z,
+    layers:   3 + Math.floor(hash(x, z, worldSeed + 500) * 3),  // 3-5 capas
+    perLayer: 4 + Math.floor(hash(x, z, worldSeed + 501) * 3),  // 4-6 rocas por capa
+  }));
+  const totalRocks = towerData.reduce((s, t) => s + t.layers * t.perLayer, 0);
+  if (!totalRocks) return;
+
+  const towIM = new THREE.InstancedMesh(rockGeo, rockMat, totalRocks);
+  towIM.castShadow = towIM.receiveShadow = true;
+  let ti = 0;
+
+  towerData.forEach(({ x, z, layers, perLayer }) => {
+    const wx     = x * TILE + TILE / 2, wz = z * TILE + TILE / 2;
+    const baseY  = groundAt(wx, wz);
+    const radius = 1.0 + hash(x, z, worldSeed + 502) * 0.8; // 1.0–1.8 m
+    // Registrar colisión: radio exterior = anillo + mitad del ancho de roca escalada
+    towerObstacles.push({ x: wx, z: wz, r: radius + TOW_SC * 0.34 + 0.4 });
+    for (let ly = 0; ly < layers; ly++) {
+      const off = (ly & 1) ? Math.PI / perLayer : 0; // capas alternas rotadas
+      for (let ri = 0; ri < perLayer; ri++) {
+        const angle = (ri / perLayer) * Math.PI * 2 + off;
+        dummy.position.set(wx + Math.cos(angle) * radius,
+                           baseY + ROCK_H * ly,
+                           wz + Math.sin(angle) * radius);
+        dummy.rotation.set(0, angle, 0);
+        dummy.scale.setScalar(TOW_SC);
+        dummy.updateMatrix();
+        towIM.setMatrixAt(ti++, dummy.matrix);
+      }
+    }
+  });
+  towIM.instanceMatrix.needsUpdate = true;
+  scene.add(towIM);
+}
 
 // ─────────────────────────────────────────────────────────────
 // INIT
@@ -1947,6 +1998,7 @@ function initGame() {
   spawnPlayer();
   spawnEnemies();
   spawnPushRocks();
+  spawnRockTowers();
   buildMinimap();
   buildHUD();
   updateStarCounter();
