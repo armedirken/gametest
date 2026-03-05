@@ -996,9 +996,12 @@ renderer.xr.addEventListener('sessionstart', () => {
   const dh = document.getElementById('desktop-hud');
   if (dh) dh.style.display = 'none';
   if (hudMesh3d) hudMesh3d.visible = true;
+  if (mmMesh3d)  mmMesh3d.visible  = true;
   if (npcDlgMesh) npcDlgMesh.visible = !!dialogNPC;
   if (pcSword)  pcSword.visible  = false;
   if (pcShield) pcShield.visible = false;
+  mmDisp.style.display  = 'none';
+  mmInfoEl.style.display = 'none';
 });
 renderer.xr.addEventListener('sessionend', () => {
   camera.position.set(0, EYE, 0);
@@ -1011,8 +1014,11 @@ renderer.xr.addEventListener('sessionend', () => {
   const dh = document.getElementById('desktop-hud');
   if (dh) dh.style.display = '';
   if (hudMesh3d) hudMesh3d.visible = false;
+  if (mmMesh3d)  mmMesh3d.visible  = false;
   if (pcSword)  pcSword.visible  = true;
   if (pcShield) pcShield.visible = true;
+  mmDisp.style.display  = '';
+  mmInfoEl.style.display = '';
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -1021,12 +1027,12 @@ renderer.xr.addEventListener('sessionend', () => {
 function createSword() {
   const g = new THREE.Group();
 
-  // Blade
+  // Blade — bottom edge at y=0.025 (top of guard) so no gap
   const blade = new THREE.Mesh(
     new THREE.BoxGeometry(0.05, 0.7, 0.008),
     new THREE.MeshLambertMaterial({ color: 0xd4d4d4 })
   );
-  blade.position.y = 0.42;
+  blade.position.y = 0.375;
   g.add(blade);
 
   // Edge highlight (white stripe along blade)
@@ -1034,7 +1040,7 @@ function createSword() {
     new THREE.BoxGeometry(0.01, 0.7, 0.012),
     new THREE.MeshLambertMaterial({ color: 0xffffff })
   );
-  edge.position.set(0.02, 0.42, 0);
+  edge.position.set(0.02, 0.375, 0);
   g.add(edge);
 
   // Guard
@@ -1083,16 +1089,46 @@ function createShield() {
   );
   g.add(rim);
 
-  // Emblema de los Tres Picos (3 triángulos)
-  const triMat = new THREE.MeshLambertMaterial({
-    color: 0xffc107, emissive: 0xff8800, emissiveIntensity: 0.4
-  });
-  for (const [ox, oy] of [[0, 0.08], [-0.055, -0.015], [0.055, -0.015]]) {
-    const tri = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.02, 3), triMat);
-    tri.rotation.x = -Math.PI / 2; // lay flat facing front of shield
-    tri.position.set(ox, oy, -0.04);
-    g.add(tri);
+  // Estrella de Eryndell — símbolo propio (8 puntas, canvas texture)
+  const _ec = document.createElement('canvas');
+  _ec.width = _ec.height = 128;
+  const _ectx = _ec.getContext('2d');
+  _ectx.clearRect(0, 0, 128, 128);
+  _ectx.save();
+  _ectx.translate(64, 64);
+  // 8 puntas grandes
+  _ectx.fillStyle = '#ffd700';
+  for (let i = 0; i < 8; i++) {
+    _ectx.save();
+    _ectx.rotate(i * Math.PI / 4);
+    _ectx.beginPath();
+    _ectx.moveTo(0, -46);
+    _ectx.lineTo(7, -18);
+    _ectx.lineTo(0, -12);
+    _ectx.lineTo(-7, -18);
+    _ectx.closePath();
+    _ectx.fill();
+    _ectx.restore();
   }
+  // círculo central
+  _ectx.beginPath();
+  _ectx.arc(0, 0, 11, 0, Math.PI * 2);
+  _ectx.fill();
+  // aro interior dorado más oscuro
+  _ectx.strokeStyle = '#b8860b';
+  _ectx.lineWidth = 2;
+  _ectx.beginPath();
+  _ectx.arc(0, 0, 11, 0, Math.PI * 2);
+  _ectx.stroke();
+  _ectx.restore();
+  const _emblemTex = new THREE.CanvasTexture(_ec);
+  // plano del emblema — solo cara delantera (FrontSide), queda en la cara del escudo
+  const emblemPlane = new THREE.Mesh(
+    new THREE.CircleGeometry(0.19, 24),
+    new THREE.MeshBasicMaterial({ map: _emblemTex, transparent: true, depthWrite: false, side: THREE.FrontSide })
+  );
+  emblemPlane.position.z = -0.022;
+  g.add(emblemPlane);
 
   // Slight forward offset so it doesn't clip the controller model
   g.position.z = -0.05;
@@ -1475,7 +1511,7 @@ function updateEnemies(dt) {
   // Sword tip world position (blade tip in sword local = (0, 0.77, 0))
   const hasSword = !!gripRefs.right;
   if (hasSword) {
-    swordTipWorld.set(0, 0.77, 0);
+    swordTipWorld.set(0, 0.725, 0);
     sword.localToWorld(swordTipWorld);
     swordVel = swordTipWorld.distanceTo(swordPrevPos) / dt;
     swordPrevPos.copy(swordTipWorld);
@@ -2180,13 +2216,27 @@ mmBuf.width = mmBuf.height = WORLD;
 const mmDisp = document.createElement('canvas');
 mmDisp.width = mmDisp.height = WORLD;
 mmDisp.style.cssText = [
-  'position:fixed', 'bottom:16px', 'left:16px',
+  'position:fixed', 'bottom:36px', 'left:16px',
   'width:160px', 'height:160px',
   'border:2px solid rgba(255,255,255,.75)',
-  'border-radius:4px', 'z-index:10',
+  'border-radius:4px 4px 0 0', 'z-index:10',
   'image-rendering:pixelated',
 ].join(';');
 document.body.appendChild(mmDisp);
+
+// Barra de coordenadas y brújula bajo el minimapa
+const mmInfoEl = document.createElement('div');
+mmInfoEl.style.cssText = [
+  'position:fixed', 'bottom:16px', 'left:16px',
+  'width:160px', 'height:20px',
+  'background:rgba(0,0,0,0.70)',
+  'border:2px solid rgba(255,255,255,.75)', 'border-top:none',
+  'border-radius:0 0 4px 4px',
+  'color:#ffd700', 'font:bold 11px monospace',
+  'display:flex', 'align-items:center', 'justify-content:center',
+  'z-index:10', 'letter-spacing:0.5px',
+].join(';');
+document.body.appendChild(mmInfoEl);
 
 const MM_PALETTE = {
   [T.DEEP]:   [13,  90, 158],
@@ -2241,6 +2291,14 @@ function drawMinimap() {
   ctx.fillStyle = '#ff3333';
   ctx.fillRect(px - 1.5, pz - 1.5, 3, 3);
   if (mmTex3d) mmTex3d.needsUpdate = true;
+
+  // Actualizar barra de coordenadas y brújula
+  const tileX = Math.floor(rig.position.x / TILE);
+  const tileZ = Math.floor(rig.position.z / TILE);
+  const _DIRS = ['N','NO','O','SO','S','SE','E','NE'];
+  const _yawNorm = ((yaw % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+  const _dir = _DIRS[Math.round(_yawNorm / (Math.PI / 4)) % 8];
+  mmInfoEl.textContent = `X:${tileX} Z:${tileZ}  ${_dir}`;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2248,7 +2306,7 @@ function drawMinimap() {
 // ─────────────────────────────────────────────────────────────
 let hpBarEl;
 // 3D HUD canvas — works in desktop and VR
-let hudCtx3d = null, hudTex3d = null, mmTex3d = null, hudMesh3d = null;
+let hudCtx3d = null, hudTex3d = null, mmTex3d = null, hudMesh3d = null, mmMesh3d = null;
 
 function drawHUD3d() {
   if (!hudCtx3d) return;
@@ -2509,15 +2567,16 @@ function buildHUD() {
   hudMesh3d.visible = false; // solo visible en VR
   camera.add(hudMesh3d);
 
-  // Minimapa 3D en VR — esquina superior izquierda
+  // Minimapa 3D en VR — esquina superior izquierda (oculto en PC)
   mmTex3d = new THREE.CanvasTexture(mmDisp);
-  const mmMesh = new THREE.Mesh(
+  mmMesh3d = new THREE.Mesh(
     new THREE.PlaneGeometry(0.20, 0.20),
     new THREE.MeshBasicMaterial({ map: mmTex3d, depthTest: false })
   );
-  mmMesh.position.set(-0.40, 0.22, -0.75);
-  mmMesh.renderOrder = 999;
-  camera.add(mmMesh);
+  mmMesh3d.position.set(-0.40, 0.22, -0.75);
+  mmMesh3d.renderOrder = 999;
+  mmMesh3d.visible = false; // solo visible en VR
+  camera.add(mmMesh3d);
 
   // 3D NPC dialog — visible in VR headset, attached to camera above HUD
   const dc = document.createElement('canvas');
@@ -2546,8 +2605,9 @@ function buildHUD() {
   camera.add(pcSword);
 
   pcShield = createShield();
-  // createShield aplica rotation.x = PI/2 internamente; solo ajustamos Y
-  pcShield.rotation.y = 0.35;
+  // rotation.y += PI para que la cara delantera (emblema) mire hacia adelante
+  // y el jugador vea la parte trasera (interior del escudo) — vista correcta en 1ª persona
+  pcShield.rotation.y = 0.35 + Math.PI;
   pcShield.position.set(-0.38, -0.30, -0.52);
   pcShield.traverse(o => { if (o.isMesh) { o.material = o.material.clone(); o.material.depthTest = false; o.renderOrder = 998; } });
   camera.add(pcShield);
