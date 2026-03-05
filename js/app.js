@@ -67,7 +67,7 @@ function fbm(x, y, oct, s) {
 // ─────────────────────────────────────────────────────────────
 let worldMap  = [];
 let heightMap = [];
-let rockList = [], starList = [];
+let starList = [];
 let worldSeed = 0;
 const _occupied = new Set(); // tiles ocupados: árboles + casas NPC → evitar intersecciones
 let stars = [];
@@ -80,12 +80,19 @@ const fireBalls       = []; // { mesh, vx, vy, vz, life } — bolas de fuego
 
 // ── NPCs y sistema de misiones ────────────────────────────────
 const npcs = [];
+// ── Aldea de Eryndell — bounds (tile coords) ──────────────────
+const VILLAGE_X0 = 19, VILLAGE_X1 = 35; // límite externo E-O
+const VILLAGE_Z0 = 26, VILLAGE_Z1 = 40; // límite externo N-S
+// Entradas: N/S en x=26-27; E en z=32-33
+const VILLAGE_N_ENT = new Set([26, 27]);
+const VILLAGE_E_ENT = new Set([32, 33]);
+
 const NPC_DEFS = [
-  { tx:14, tz:30, name:'Aldeana',  color:0xff9999, questId:0 },
-  { tx:32, tz:38, name:'Herrero',  color:0xaaaaff, questId:1 },
-  { tx:48, tz:30, name:'Maga',     color:0xcc88ff, questId:2 },
-  { tx:18, tz:18, name:'Mercader', color:0xffcc66, questId:3 },
-  { tx:38, tz:50, name:'Ermitaño', color:0x99ffcc, questId:4 },
+  { tx:22, tz:30, name:'Aldeana',  color:0xff9999, questId:0 }, // NO del pueblo
+  { tx:32, tz:30, name:'Herrero',  color:0xaaaaff, questId:1 }, // NE del pueblo
+  { tx:22, tz:37, name:'Maga',     color:0xcc88ff, questId:2 }, // SO del pueblo
+  { tx:32, tz:37, name:'Mercader', color:0xffcc66, questId:3 }, // SE del pueblo
+  { tx:27, tz:38, name:'Ermitaño', color:0x99ffcc, questId:4 }, // Sur centro
 ];
 const QUEST_DEFS = [
   { id:0, title:'Las Monedas Perdidas',    desc:'Recoge 30 monedas doradas\nesparcidas por el mundo.',   goal:30, type:'coins',   reward:'un amuleto de suerte' },
@@ -247,6 +254,11 @@ function generateMap() {
   // ── DUNGEONS / PALACES ────────────────────────────────────
   placeDungeons();
 
+  // ── ALDEA DE ERYNDELL — suelo PATH plano (altura = 0) ────
+  for (let z = VILLAGE_Z0; z <= VILLAGE_Z1; z++)
+    for (let x = VILLAGE_X0; x <= VILLAGE_X1; x++)
+      worldMap[z][x] = T.PATH;
+
   // ── HEIGHT MAP ───────────────────────────────────────────
   heightMap = [];
   for (let z = 0; z < WORLD; z++) {
@@ -305,16 +317,14 @@ function generateMap() {
   worldMap[9][51] = T.PATH; // puerta sur (2 tiles de ancho)
 
   // ── TREE / ROCK / STAR LISTS ─────────────────────────────
-  rockList = []; starList = [];
+  starList = [];
   treeLists = [[], [], []];
   _occupied.clear();
 
-  // Pre-bloquear footprint de casas NPC (±2 tiles alrededor del centro)
-  for (const def of NPC_DEFS) {
-    for (let dz = -2; dz <= 2; dz++)
-      for (let dx = -2; dx <= 2; dx++)
-        _occupied.add((def.tx + dx) + ',' + (def.tz + dz));
-  }
+  // Pre-bloquear toda la aldea + margen exterior (sin árboles ni rocas adentro)
+  for (let z = VILLAGE_Z0 - 1; z <= VILLAGE_Z1 + 1; z++)
+    for (let x = VILLAGE_X0 - 1; x <= VILLAGE_X1 + 1; x++)
+      _occupied.add(x + ',' + z);
 
   const STAR_TILES  = new Set([T.GRASS, T.PATH, T.SAND, T.DFLOOR]);
   const PUSH_TILES  = new Set([T.GRASS, T.MOUND, T.SAND]);
@@ -348,7 +358,7 @@ function generateMap() {
         treeLists[0].push([x, z]); _occupied.add(key);
       }
 
-      if ((t === T.MOUND || t === T.GRASS) && hash(x, z, worldSeed+2) > 0.87) rockList.push([x, z]);
+      // rockList decorativo eliminado — las rocas "balón" (DodecahedronGeometry) ya no se usan
 
       // Monedas: saltar tiles con árbol, roca empujable o torre
       if (starList.length < 30 && STAR_TILES.has(t) && !_occupied.has(key)
@@ -740,24 +750,7 @@ function buildScene() {
     });
   });
 
-  // ── Rocks ────────────────────────────────────────────────────
-  if (rockList.length) {
-    const rIM = new THREE.InstancedMesh(
-      new THREE.DodecahedronGeometry(0.38, 0),
-      new THREE.MeshLambertMaterial({ color: COLOR.STONE }), rockList.length);
-    rIM.castShadow = true;
-    rockList.forEach(([x, z], i) => {
-      dummy.position.set(x*TILE + TILE/2, heightMap[z][x] + 0.28, z*TILE + TILE/2);
-      dummy.rotation.set(
-        hash(x, z, worldSeed+8) * Math.PI,
-        hash(x, z, worldSeed+9) * Math.PI, 0);
-      dummy.scale.setScalar(0.5 + hash(x, z, worldSeed+10) * 0.9);
-      dummy.updateMatrix();
-      rIM.setMatrixAt(i, dummy.matrix);
-    });
-    rIM.instanceMatrix.needsUpdate = true;
-    scene.add(rIM);
-  }
+  // Rocas decorativas eliminadas (DodecahedronGeometry parecía balón de fútbol)
 
   // ── Monedas — InstancedMesh (30 meshes → 1 draw call, mejora #15) ──
   stars = [];
@@ -2605,11 +2598,12 @@ function buildHUD() {
   camera.add(pcSword);
 
   pcShield = createShield();
-  // rotation.y += PI para que la cara delantera (emblema) mire hacia adelante
-  // y el jugador vea la parte trasera (interior del escudo) — vista correcta en 1ª persona
+  // En PC el jugador ve la parte trasera del escudo (el emblema queda hacia los enemigos)
   pcShield.rotation.y = 0.35 + Math.PI;
   pcShield.position.set(-0.38, -0.30, -0.52);
   pcShield.traverse(o => { if (o.isMesh) { o.material = o.material.clone(); o.material.depthTest = false; o.renderOrder = 998; } });
+  // Ocultar explícitamente el plano del emblema en vista PC (ya está al otro lado)
+  pcShield.traverse(o => { if (o.isMesh && o.material && o.material.map) o.visible = false; });
   camera.add(pcShield);
 }
 
@@ -3099,6 +3093,98 @@ function spawnNPCs() {
   });
 }
 
+// ─────────────────────────────────────────────────────────────
+// ALDEA DE ERYNDELL — muro perimetral, entradas y carteles
+// ─────────────────────────────────────────────────────────────
+function _makeSignTex() {
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 80;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#6b3d0e';
+  ctx.fillRect(0, 0, 256, 80);
+  ctx.strokeStyle = '#3d1a00';
+  ctx.lineWidth = 4;
+  ctx.strokeRect(4, 4, 248, 72);
+  ctx.fillStyle = '#ffd700';
+  ctx.font = 'bold 17px serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('★ ALDEA DE ERYNDELL ★', 128, 26);
+  ctx.fillStyle = '#ffeeaa';
+  ctx.font = '13px serif';
+  ctx.fillText('Bienvenido, viajero', 128, 56);
+  return new THREE.CanvasTexture(c);
+}
+
+function spawnVillage() {
+  // ── Muro perimetral con rockGeo ─────────────────────────────
+  // rockGeo base: 0.68 × 1.02 × 0.68 m  → escalar para llenar 1 TILE × 2.5m × 1m
+  const SX = TILE / 0.68;       // ~4.41  ancho = 1 tile (3m)
+  const SY = 2.5  / 1.02;       // ~2.45  alto  = 2.5m
+  const SZ = 1.0  / 0.68;       // ~1.47  fondo = 1m
+
+  const wallSegs = [];
+
+  // Muro Norte (z = VILLAGE_Z0)
+  for (let x = VILLAGE_X0; x <= VILLAGE_X1; x++) {
+    if (VILLAGE_N_ENT.has(x)) continue; // entrada norte
+    wallSegs.push({ tx: x, tz: VILLAGE_Z0, rotY: 0 });
+  }
+  // Muro Sur (z = VILLAGE_Z1)
+  for (let x = VILLAGE_X0; x <= VILLAGE_X1; x++) {
+    if (VILLAGE_N_ENT.has(x)) continue; // entrada sur
+    wallSegs.push({ tx: x, tz: VILLAGE_Z1, rotY: 0 });
+  }
+  // Muro Oeste (x = VILLAGE_X0)
+  for (let z = VILLAGE_Z0 + 1; z < VILLAGE_Z1; z++)
+    wallSegs.push({ tx: VILLAGE_X0, tz: z, rotY: Math.PI / 2 });
+  // Muro Este (x = VILLAGE_X1)
+  for (let z = VILLAGE_Z0 + 1; z < VILLAGE_Z1; z++) {
+    if (VILLAGE_E_ENT.has(z)) continue; // entrada este
+    wallSegs.push({ tx: VILLAGE_X1, tz: z, rotY: Math.PI / 2 });
+  }
+
+  const wIM = new THREE.InstancedMesh(rockGeo, rockMat, wallSegs.length);
+  wIM.castShadow = wIM.receiveShadow = true;
+  const wd = new THREE.Object3D();
+  wallSegs.forEach(({ tx, tz, rotY }, i) => {
+    const wx = tx * TILE + TILE / 2;
+    const wz = tz * TILE + TILE / 2;
+    wd.position.set(wx, groundAt(wx, wz) + 1.25, wz);
+    wd.rotation.set(0, rotY, 0);
+    wd.scale.set(SX, SY, SZ);
+    wd.updateMatrix();
+    wIM.setMatrixAt(i, wd.matrix);
+  });
+  wIM.instanceMatrix.needsUpdate = true;
+  scene.add(wIM);
+
+  // ── Carteles en las 3 entradas ──────────────────────────────
+  const signTex  = _makeSignTex();
+  const signMat  = new THREE.MeshLambertMaterial({ color: 0x5a3518 });
+  const boardMat = new THREE.MeshBasicMaterial({ map: signTex });
+  const postGeo  = new THREE.CylinderGeometry(0.07, 0.10, 2.4, 6);
+  const boardGeo = new THREE.BoxGeometry(2.4, 0.75, 0.12);
+
+  function makeSign(wx, wz, rotY) {
+    const g = new THREE.Group();
+    const post = new THREE.Mesh(postGeo, signMat);
+    post.position.y = 1.2;
+    g.add(post);
+    const board = new THREE.Mesh(boardGeo, boardMat);
+    board.position.y = 2.55;
+    g.add(board);
+    g.position.set(wx, groundAt(wx, wz), wz);
+    g.rotation.y = rotY;
+    scene.add(g);
+  }
+
+  const signCX = 27 * TILE + TILE / 2; // centro X de la entrada N/S
+  makeSign(signCX, (VILLAGE_Z0 - 1) * TILE + TILE / 2, 0);                         // Norte
+  makeSign(signCX, (VILLAGE_Z1 + 1) * TILE + TILE / 2, Math.PI);                   // Sur
+  makeSign((VILLAGE_X1 + 1) * TILE + TILE / 2, 33 * TILE + TILE / 2, Math.PI / 2); // Este
+}
+
 function updateNPCs(dt) {
   const px = rig.position.x, pz = rig.position.z;
 
@@ -3248,6 +3334,7 @@ function initGame() {
   spawnRockTowers();
   spawnDragons();
   spawnNPCs();
+  spawnVillage();
   buildMinimap();
   buildHUD();
   updateStarCounter();
