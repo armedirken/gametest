@@ -76,6 +76,47 @@ const towerObstacles  = []; // { x, z, r } — colisión cilíndrica de torres
 const dragonRoosts    = []; // { x, z, topY } — cima de cada torre con dragón
 const dragons         = []; // objetos dragón activos
 const fireBalls       = []; // { mesh, vx, vy, vz, life } — bolas de fuego
+
+// ── NPCs y sistema de misiones ────────────────────────────────
+const npcs = [];
+const NPC_DEFS = [
+  { tx:14, tz:30, name:'Aldeana',  color:0xff9999, questId:0 },
+  { tx:32, tz:38, name:'Herrero',  color:0xaaaaff, questId:1 },
+  { tx:48, tz:30, name:'Maga',     color:0xcc88ff, questId:2 },
+  { tx:18, tz:18, name:'Mercader', color:0xffcc66, questId:3 },
+  { tx:38, tz:50, name:'Ermitaño', color:0x99ffcc, questId:4 },
+];
+const QUEST_DEFS = [
+  { id:0, title:'Las Monedas Perdidas',    desc:'Recoge 30 monedas doradas\nesparcidas por el mundo.',   goal:30, type:'coins',   reward:'un amuleto de suerte' },
+  { id:1, title:'Caza de Monstruos',       desc:'Elimina 5 slimes verdes\nque amenazan la aldea.',       goal:5,  type:'kills',   reward:'una espada mejorada' },
+  { id:2, title:'Las Cuatro Torres',       desc:'Visita las 4 torres\nde piedra del mundo.',             goal:4,  type:'towers',  reward:'un libro de hechizos' },
+  { id:3, title:'El Gran Explorador',      desc:'Llega al interior\ndel Castillo de Hyrule.',            goal:1,  type:'castle',  reward:'una bolsa de monedas' },
+  { id:4, title:'El Último Superviviente', desc:'Sobrevive 60 segundos\ncon enemigos cerca.',            goal:60, type:'survive', reward:'el escudo legendario' },
+];
+let activeQuestId  = -1;
+let questProgress  = 0;
+let questComplete  = false;
+let npcDialogEl    = null;
+let dialogNPC      = null;
+let surviveTimer   = 0;
+let towersVisited  = new Set();
+let castleEntered  = false;
+let questHudEl     = null;
+
+// ── Mejoras globales ──────────────────────────────────────────
+let playerShadow   = null;
+let stamina        = 1.0;
+let lastDamageTime = 0;
+let regenTimer     = 0;
+let comboCount     = 0;
+let comboTimer     = 0;
+let comboEl        = null;
+let questOverlayTimeout = null;
+let minimapZoom    = 1;   // 1 = normal, 2 = zoom out
+let fireflyList    = [];  // luciérnagas en bosque
+let enemyAlertList = [];  // { mesh, timer } — '!' sobre slimes aggroed
+let dmgParticles   = [];  // partículas de muerte de enemigos
+let rockParticles  = [];  // partículas al romper roca
 const rockGeo = _makeRockGeo(42);
 const rockMat = new THREE.MeshLambertMaterial({ map: _makeRockTex(), flatShading: true });
 
@@ -360,6 +401,10 @@ function placeDungeons() {
     worldMap[Math.min(d.z + d.h - 1, WORLD-1)][d.x + Math.floor(d.w / 2)] = T.PATH;
   }
 }
+
+// ─────────────────────────────────────────────────────────────
+// PLAYER SHADOW (mejora #2) — declarada aquí, creada en buildScene
+// ─────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────
 // THREE.JS SETUP
@@ -758,6 +803,61 @@ function buildScene() {
   );
   sunMesh.position.set(140, 180, 100);
   scene.add(sunMesh);
+
+  // ── Player shadow (mejora #2) ────────────────────────────────
+  const shadowGeo = new THREE.CircleGeometry(0.35, 8);
+  const shadowMat = new THREE.MeshBasicMaterial({ color: 0x000000, opacity: 0.3, transparent: true });
+  playerShadow = new THREE.Mesh(shadowGeo, shadowMat);
+  playerShadow.rotation.x = -Math.PI / 2;
+  playerShadow.position.y = 0.01;
+  scene.add(playerShadow);
+
+  // ── Fireflies en bosque (mejora #12) ────────────────────────
+  fireflyList = [];
+  const ffGeo = new THREE.SphereGeometry(0.06, 4, 3);
+  const ffMat = new THREE.MeshBasicMaterial({ color: 0xaaffaa, transparent: true, opacity: 0.85 });
+  let ffCount = 0;
+  for (let z = 2; z < WORLD - 2 && ffCount < 30; z++) {
+    for (let x = 2; x < WORLD - 2 && ffCount < 30; x++) {
+      if (worldMap[z][x] === T.FOREST && hash(x, z, worldSeed + 333) > 0.95) {
+        const wx = x * TILE + TILE / 2, wz = z * TILE + TILE / 2;
+        const ff = new THREE.Mesh(ffGeo, ffMat);
+        const baseY = groundAt(wx, wz) + 1.0 + hash(x, z, worldSeed + 334) * 1.5;
+        ff.position.set(wx, baseY, wz);
+        scene.add(ff);
+        fireflyList.push({ mesh: ff, baseY, phase: hash(x, z, worldSeed + 335) * Math.PI * 2,
+                           wx, wz });
+        ffCount++;
+      }
+    }
+  }
+
+  // ── Moon (mejora #7) ─────────────────────────────────────────
+  const moonMesh = new THREE.Mesh(
+    new THREE.SphereGeometry(3, 10, 8),
+    new THREE.MeshBasicMaterial({ color: 0xeeeebb })
+  );
+  moonMesh.position.set(-140, 180, -100);
+  moonMesh.name = 'moon';
+  scene.add(moonMesh);
+
+  // Stars (mejora #7) — pequeños puntos fijos
+  const starFieldGeo = new THREE.BufferGeometry();
+  const sfPos = new Float32Array(200 * 3);
+  for (let i = 0; i < 200; i++) {
+    const theta = Math.random() * Math.PI * 2;
+    const phi   = Math.random() * Math.PI;
+    const r     = 280;
+    sfPos[i*3]   = r * Math.sin(phi) * Math.cos(theta);
+    sfPos[i*3+1] = Math.abs(r * Math.cos(phi)) + 20;
+    sfPos[i*3+2] = r * Math.sin(phi) * Math.sin(theta);
+  }
+  starFieldGeo.setAttribute('position', new THREE.BufferAttribute(sfPos, 3));
+  const starFieldMesh = new THREE.Points(starFieldGeo,
+    new THREE.PointsMaterial({ color: 0xffffff, size: 1.8, sizeAttenuation: true }));
+  starFieldMesh.name = 'starfield';
+  starFieldMesh.visible = false;
+  scene.add(starFieldMesh);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -783,7 +883,20 @@ function spawnPlayer() {
 // CONTROLS — KEYBOARD + MOUSE
 // ─────────────────────────────────────────────────────────────
 const keys = {};
-window.addEventListener('keydown', e => { keys[e.code] = true; });
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  switch (e.code) {
+    case 'KeyE':
+      if (dialogNPC) {
+        if (activeQuestId !== dialogNPC.questId && !questComplete) acceptQuest(dialogNPC);
+        else closeDialog();
+      }
+      break;
+    case 'KeyM':
+      minimapZoom = minimapZoom === 1 ? 2 : 1;
+      break;
+  }
+});
 window.addEventListener('keyup',   e => { delete keys[e.code]; });
 
 let yaw = 0, pitch = 0, pointerLocked = false;
@@ -1010,7 +1123,28 @@ function move(dt) {
 
   stepTimer = Math.max(0, stepTimer - dt);
 
-  if (mx !== 0 || mz !== 0) {
+  const isMoving = mx !== 0 || mz !== 0;
+
+  // Sprint (mejora #4) — Shift acelera, drena stamina
+  const isSprinting = (keys['ShiftLeft'] || keys['ShiftRight']) && stamina > 0.05 && isMoving && !renderer.xr.isPresenting;
+  if (isSprinting) stamina = Math.max(0, stamina - dt * 0.5);
+  else stamina = Math.min(1, stamina + dt * 0.25);
+
+  // Castle quest progress (mejora #3)
+  if (activeQuestId === 3 && !questComplete) {
+    const curTile = tileAt(rig.position.x, rig.position.z);
+    if (curTile === T.DFLOOR && !castleEntered) {
+      castleEntered = true; questProgress = 1; questComplete = true; updateQuestHUD();
+    }
+  }
+
+  // Camera bob (mejora #1)
+  if (!renderer.xr.isPresenting) {
+    const bobAmt = isMoving ? Math.sin(elapsed * 8) * 0.04 : 0;
+    camera.position.y = EYE + bobAmt;
+  }
+
+  if (isMoving) {
     let hy = yaw;
     if (renderer.xr.isPresenting) {
       // Reutilizar _tmpQ/_tmpE — sin new por frame (mejora #14)
@@ -1024,9 +1158,9 @@ function move(dt) {
     const prevX = rig.position.x, prevZ = rig.position.z;
     const maxW  = (WORLD - 1) * TILE;
 
-    // Swim at half speed in shallow water
+    // Swim at half speed in shallow water; sprint multiplier
     const inWater = tileAt(rig.position.x, rig.position.z) === T.WATER;
-    const spd = inWater ? SPEED * 0.5 : SPEED;
+    const spd = (inWater ? SPEED * 0.5 : SPEED) * (isSprinting ? 1.6 : 1.0);
 
     rig.position.x = Math.max(1, Math.min(maxW, rig.position.x + _tmpV3.x * spd * dt));
     rig.position.z = Math.max(1, Math.min(maxW, rig.position.z + _tmpV3.z * spd * dt));
@@ -1169,6 +1303,38 @@ const sfx = {
       osc.start(t0); osc.stop(t0 + 0.25);
     });
   },
+  questAccept() {
+    const ctx = getAudioCtx(), t = ctx.currentTime;
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(440, t);
+    o.frequency.setValueAtTime(550, t + 0.1);
+    o.frequency.setValueAtTime(660, t + 0.2);
+    g.gain.setValueAtTime(0.2, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+    o.connect(g); g.connect(ctx.destination);
+    o.start(t); o.stop(t + 0.45);
+  },
+  questComplete() {
+    const ctx = getAudioCtx(), t = ctx.currentTime;
+    [523, 659, 784, 1047].forEach((f, i) => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = 'sine'; o.frequency.value = f;
+      g.gain.setValueAtTime(0.22, t + i * 0.12);
+      g.gain.exponentialRampToValueAtTime(0.001, t + i * 0.12 + 0.4);
+      o.connect(g); g.connect(ctx.destination);
+      o.start(t + i * 0.12); o.stop(t + i * 0.12 + 0.45);
+    });
+  },
+  heartPickup() {
+    const ctx = getAudioCtx(), t = ctx.currentTime;
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(330, t);
+    o.frequency.exponentialRampToValueAtTime(660, t + 0.25);
+    g.gain.setValueAtTime(0.22, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+    o.connect(g); g.connect(ctx.destination);
+    o.start(t); o.stop(t + 0.38);
+  },
 };
 
 // ── Background music (coloca soundtrack.mp3 en assets/audio/) ─
@@ -1273,7 +1439,17 @@ function updateEnemies(dt) {
     const dist = Math.sqrt(dx * dx + dz * dz);
 
     // Aggro transitions
-    if (!e.aggroed && dist < 8)  { e.aggroed = true; e.patrolTarget = null; sfx.squeak(); }
+    if (!e.aggroed && dist < 8)  {
+      e.aggroed = true; e.patrolTarget = null; sfx.squeak();
+      // Alert icon (mejora #8)
+      const alertGeo = new THREE.SphereGeometry(0.10, 5, 4);
+      const alertMat = new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true });
+      const alertMesh = new THREE.Mesh(alertGeo, alertMat);
+      alertMesh.position.copy(e.mesh.position);
+      alertMesh.position.y += 1.2;
+      scene.add(alertMesh);
+      enemyAlertList.push({ mesh: alertMesh, timer: 0.8 });
+    }
     if (e.aggroed  && dist > 12) {
       e.aggroed = false;
       e.lungePhase = 'cooldown'; e.lungeT = 0.4;
@@ -1368,6 +1544,10 @@ function updateEnemies(dt) {
               playerHP = Math.max(0, playerHP - 1);
               updateHPBar();
               flashDamage();               // mejora #4: flash rojo en pantalla
+              lastDamageTime = elapsed;
+              regenTimer = 0;
+              // Floating damage number (mejora #5)
+              showFloatingDmg();
             }
           }
           if (e.lungeT <= 0) {
@@ -1441,16 +1621,69 @@ function updateEnemies(dt) {
         const kd = tipDist || 1;
         e.vx = (e.mesh.position.x - swordTipWorld.x) / kd * 5.5;
         e.vz = (e.mesh.position.z - swordTipWorld.z) / kd * 5.5;
-        if (e.hp <= 0) { e.dead = true; sfx.death(); enemiesKilled++; }
+        if (e.hp <= 0) {
+          e.dead = true; sfx.death(); enemiesKilled++;
+          spawnDeathParticles(e.mesh.position);
+          onEnemyKilled();
+        }
       }
     }
     // Space key hit (desktop)
     if (keys['Space'] && dist < 2.5 && e.hitCooldown === 0) {
       e.hp--; e.hitCooldown = 0.5; sfx.hit();
       e.hitFlashT = 0.20; e.squashT = 0.12;
-      if (e.hp <= 0) { e.dead = true; sfx.death(); enemiesKilled++; }
+      if (e.hp <= 0) {
+        e.dead = true; sfx.death(); enemiesKilled++;
+        spawnDeathParticles(e.mesh.position);
+        onEnemyKilled();
+      }
     }
   }
+}
+
+function onEnemyKilled() {
+  // Quest kills
+  if (activeQuestId === 1) {
+    questProgress = enemiesKilled;
+    updateQuestHUD();
+    if (enemiesKilled >= 5) { questComplete = true; updateQuestHUD(); }
+  }
+  // Combo (mejora #15)
+  comboTimer = 3.0;
+  comboCount++;
+  if (comboCount >= 2 && comboEl) {
+    comboEl.textContent = 'COMBO x' + comboCount + '!';
+    comboEl.style.display = 'block';
+    comboEl.style.opacity = '1';
+  }
+}
+
+function spawnDeathParticles(pos) {
+  const pGeo = new THREE.SphereGeometry(0.08, 4, 3);
+  const pMat = new THREE.MeshBasicMaterial({ color: 0x33ff33, transparent: true });
+  for (let i = 0; i < 5; i++) {
+    const pm = new THREE.Mesh(pGeo, pMat);
+    pm.position.copy(pos);
+    pm.position.y += 0.3;
+    scene.add(pm);
+    const angle = (i / 5) * Math.PI * 2;
+    dmgParticles.push({ mesh: pm, vx: Math.cos(angle) * 3, vy: 2 + Math.random() * 2,
+                        vz: Math.sin(angle) * 3, life: 0.5 });
+  }
+}
+
+// Floating damage number (mejora #5)
+let _floatDmgEl = null;
+function showFloatingDmg() {
+  if (!_floatDmgEl) {
+    _floatDmgEl = document.createElement('div');
+    _floatDmgEl.style.cssText = 'position:fixed;left:50%;top:42%;transform:translateX(-50%);color:#ff4444;font-family:monospace;font-size:28px;font-weight:bold;pointer-events:none;z-index:150;text-shadow:0 0 8px #f00;transition:opacity 0.6s';
+    document.body.appendChild(_floatDmgEl);
+  }
+  _floatDmgEl.textContent = '-1';
+  _floatDmgEl.style.opacity = '1';
+  clearTimeout(_floatDmgEl._t);
+  _floatDmgEl._t = setTimeout(() => { _floatDmgEl.style.opacity = '0'; }, 400);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1495,6 +1728,18 @@ function updatePushRocks(dt) {
     r.mesh.rotation.z = 0;
     r.vx = 0; r.vz = 0;
     sfx.hit();
+    // Partículas de polvo al romper roca (mejora #19)
+    const dustGeo = new THREE.SphereGeometry(0.12, 4, 3);
+    const dustMat = new THREE.MeshBasicMaterial({ color: 0xbbaa88, transparent: true, opacity: 0.7 });
+    for (let i = 0; i < 6; i++) {
+      const dm = new THREE.Mesh(dustGeo, dustMat);
+      dm.position.copy(r.mesh.position);
+      dm.position.y += 1.0;
+      scene.add(dm);
+      const angle = (i / 6) * Math.PI * 2;
+      rockParticles.push({ mesh: dm, vx: Math.cos(angle) * 2.5, vy: 1.5 + Math.random(),
+                           vz: Math.sin(angle) * 2.5, life: 0.6 });
+    }
   }
 
   for (const r of pushRocks) {
@@ -1614,11 +1859,25 @@ function updatePushRocks(dt) {
 // ─────────────────────────────────────────────────────────────
 let gameEnded = false;
 
-// Flash rojo en pantalla al recibir daño (mejora #4)
+// Flash rojo en pantalla al recibir daño (mejora #4) + shake (mejora #13)
+let _shakeT = 0;
 function flashDamage() {
   if (!dmgFlashEl) return;
   dmgFlashEl.style.opacity = '0.45';
   setTimeout(() => { if (dmgFlashEl) dmgFlashEl.style.opacity = '0'; }, 60);
+  _shakeT = 0.25; // segundos de camera shake
+}
+
+function updateCameraShake(dt) {
+  if (_shakeT > 0 && !renderer.xr.isPresenting) {
+    _shakeT = Math.max(0, _shakeT - dt);
+    const s = _shakeT * 0.035;
+    camera.position.x = (Math.random() - 0.5) * s;
+    camera.position.z = (Math.random() - 0.5) * s;
+  } else if (!renderer.xr.isPresenting && _shakeT <= 0) {
+    camera.position.x = 0;
+    camera.position.z = 0;
+  }
 }
 
 // Escudo activo: grip izquierdo en VR o Shift en desktop (mejora #20)
@@ -1681,12 +1940,25 @@ function checkStarCollection() {
   for (const s of stars) {
     if (s.collected) continue;
     const dx = s.wx - px, dz = s.wz - pz;
-    if (dx * dx + dz * dz < 1.5 * 1.5) {
+    const d2 = dx * dx + dz * dz;
+    // Coin magnet (mejora #6): acerca la moneda al jugador si está a <2.5m
+    if (d2 < 2.5 * 2.5 && d2 > 1.2 * 1.2) {
+      const d = Math.sqrt(d2) || 1;
+      s.wx += (px - s.wx) / d * 4 * (1 / 60); // paso suave
+      s.wz += (pz - s.wz) / d * 4 * (1 / 60);
+    }
+    if (d2 < 1.5 * 1.5) {
       s.collected = true;
       s.rising = true; s.riseT = 0;  // mejora #18: animación de subida
       coinsCollected++;               // mejora #12: contador directo
       sfx.starCollect();
       anyNew = true;
+      // Quest monedas
+      if (activeQuestId === 0) {
+        questProgress = coinsCollected;
+        updateQuestHUD();
+        if (coinsCollected >= 30) { questComplete = true; updateQuestHUD(); }
+      }
     }
   }
   if (anyNew) {
@@ -1754,6 +2026,13 @@ function updateDayNight(dt) {
 
   // Update rain chance on day boundary
   if (isRaining && brightness < 0.01) stopRain();
+
+  // Moon & starfield (mejora #7)
+  const moonObj = scene.getObjectByName('moon');
+  const sfObj   = scene.getObjectByName('starfield');
+  const isNight = dayTime < 0.25 || dayTime > 0.75;
+  if (moonObj) moonObj.visible = isNight;
+  if (sfObj)   sfObj.visible   = isNight;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1880,9 +2159,29 @@ function buildMinimap() {
 
 function drawMinimap() {
   const ctx = mmDisp.getContext('2d');
-  ctx.drawImage(mmBuf, 0, 0);
   const px = rig.position.x / (WORLD * TILE) * WORLD;
   const pz = rig.position.z / (WORLD * TILE) * WORLD;
+
+  // Minimap zoom (mejora #17)
+  if (minimapZoom === 1) {
+    ctx.drawImage(mmBuf, 0, 0);
+  } else {
+    // Zoom out: escalar el mapa para mostrar más area
+    ctx.clearRect(0, 0, WORLD, WORLD);
+    ctx.drawImage(mmBuf, 0, 0, WORLD, WORLD, -WORLD / 2, -WORLD / 2, WORLD * 2, WORLD * 2);
+  }
+
+  // NPC markers (mejora #10)
+  ctx.fillStyle = '#ffff00';
+  for (const n of npcs) {
+    const nx = n.wx / (WORLD * TILE) * WORLD;
+    const nz = (n.wz - 3.2) / (WORLD * TILE) * WORLD; // offset de la posición frente a la puerta
+    ctx.beginPath();
+    ctx.arc(nx, nz, 1.8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Player dot
   ctx.fillStyle = '#ff3333';
   ctx.fillRect(px - 1.5, pz - 1.5, 3, 3);
   if (mmTex3d) mmTex3d.needsUpdate = true;
@@ -1955,6 +2254,69 @@ function show3DOverlay(titleText, subText, titleColor) {
   setTimeout(() => location.reload(), 4000);
 }
 
+function updateQuestHUD() {
+  if (!questHudEl) return;
+  if (activeQuestId === -1) { questHudEl.style.display = 'none'; return; }
+  const q = QUEST_DEFS[activeQuestId];
+  questHudEl.style.display = 'block';
+  const pct = Math.min(1, questProgress / q.goal);
+  const filled = Math.round(pct * 12);
+  const bar = '\u2588'.repeat(filled) + '\u2591'.repeat(12 - filled);
+  questHudEl.textContent = q.title + '  [' + bar + ']  ' + questProgress + '/' + q.goal;
+}
+
+function openDialog(npc) {
+  if (dialogNPC === npc) { closeDialog(); return; }
+  dialogNPC = npc;
+  const q = QUEST_DEFS[npc.questId];
+  const isActive   = activeQuestId === q.id;
+  const isComplete = isActive && questComplete;
+  let html = '<b style="color:#ffd700">' + npc.name + '</b><br><br>';
+  if (isComplete) {
+    html += '<b style="color:#44ff44">Mision completada!</b><br>Recibe: <i>' + q.reward + '</i>';
+    sfx.questComplete();
+    activeQuestId = -1; questProgress = 0; questComplete = false;
+    updateQuestHUD();
+    showQuestCompleteOverlay(q);
+  } else if (isActive) {
+    html += '<b>' + q.title + '</b><br><br>' + q.desc.replace(/\n/g, '<br>') + '<br><br>Progreso: ' + questProgress + '/' + q.goal;
+  } else {
+    html += '<b>' + q.title + '</b><br><br>' + q.desc.replace(/\n/g, '<br>') + '<br><br><i style="color:#aaa">Presiona E para aceptar</i>';
+  }
+  if (npcDialogEl) {
+    npcDialogEl.innerHTML = html;
+    npcDialogEl.style.display = 'block';
+  }
+}
+
+function closeDialog() {
+  dialogNPC = null;
+  if (npcDialogEl) npcDialogEl.style.display = 'none';
+}
+
+function acceptQuest(npc) {
+  if (activeQuestId !== -1 && activeQuestId !== npc.questId) return;
+  if (questComplete) return;
+  activeQuestId = npc.questId;
+  questProgress = 0;
+  questComplete = false;
+  surviveTimer  = 0;
+  towersVisited.clear();
+  castleEntered = false;
+  closeDialog();
+  updateQuestHUD();
+  sfx.questAccept();
+}
+
+function showQuestCompleteOverlay(q) {
+  const ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;left:50%;top:30%;transform:translateX(-50%);background:rgba(0,0,0,0.88);color:#ffd700;font-family:monospace;font-size:22px;padding:28px 40px;border-radius:14px;border:2px solid #ffd700;text-align:center;z-index:300;pointer-events:none';
+  ov.innerHTML = '<b>Mision completada!</b><br><br>' + q.title + '<br><span style="color:#fff;font-size:16px">Recompensa: ' + q.reward + '</span>';
+  document.body.appendChild(ov);
+  clearTimeout(questOverlayTimeout);
+  questOverlayTimeout = setTimeout(() => ov.remove(), 3000);
+}
+
 function buildHUD() {
   // HTML overlay (desktop)
   const el = document.createElement('div');
@@ -1969,7 +2331,7 @@ function buildHUD() {
   el.innerHTML = `
     <div style="color:#7fff7f;font-size:15px;margin-bottom:3px">&#9876; Hyrule — Light World</div>
     <div>WASD / Arrows &mdash; Move</div>
-    <div>Click canvas &mdash; Mouse look &nbsp;|&nbsp; Space &mdash; Attack</div>
+    <div>Click canvas &mdash; Mouse look &nbsp;|&nbsp; Space &mdash; Attack &nbsp;|&nbsp; E &mdash; Hablar &nbsp;|&nbsp; M &mdash; Mapa</div>
     <div>Left stick &mdash; Move (VR) &nbsp;|&nbsp; Swing right &mdash; Slash</div>
     <div id="hp" style="margin-top:6px;font-size:16px;color:#ff8888">♥♥♥♥♥</div>
     <div id="stars" style="font-size:14px;color:#ffd700;margin-top:3px">&#9733; 0 / 0</div>
@@ -1982,6 +2344,30 @@ function buildHUD() {
   dmgFlashEl = document.createElement('div');
   dmgFlashEl.style.cssText = 'position:fixed;inset:0;background:#ff0000;opacity:0;pointer-events:none;z-index:100;transition:opacity 0.35s ease-out';
   document.body.appendChild(dmgFlashEl);
+
+  // NPC dialog
+  npcDialogEl = document.createElement('div');
+  npcDialogEl.style.cssText = [
+    'position:fixed', 'left:50%', 'bottom:18%',
+    'transform:translateX(-50%)',
+    'background:rgba(0,0,0,0.85)', 'color:#fff',
+    'font-family:monospace', 'font-size:16px',
+    'padding:18px 28px', 'border-radius:10px',
+    'border:2px solid #ffd700', 'max-width:420px',
+    'text-align:center', 'display:none',
+    'z-index:200', 'pointer-events:none', 'line-height:1.6',
+  ].join(';');
+  document.body.appendChild(npcDialogEl);
+
+  // Quest HUD
+  questHudEl = document.createElement('div');
+  questHudEl.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.7);color:#ffd700;font-family:monospace;font-size:14px;padding:8px 18px;border-radius:8px;display:none;z-index:150;text-align:center';
+  document.body.appendChild(questHudEl);
+
+  // Combo counter (mejora #15)
+  comboEl = document.createElement('div');
+  comboEl.style.cssText = 'position:fixed;right:24px;top:80px;color:#ffaa00;font-family:monospace;font-size:22px;font-weight:bold;display:none;z-index:150;text-shadow:0 0 8px #ff6600;pointer-events:none';
+  document.body.appendChild(comboEl);
 
   // 3D HUD — visible in VR headset, attached to camera
   const hc = document.createElement('canvas');
@@ -2034,17 +2420,20 @@ renderer.setAnimationLoop(() => {
     updateEnemies(dt);
     updatePushRocks(dt);
     updateDragons(dt);
+    updateNPCs(dt);
     checkStarCollection();
     updateDayNight(dt);
     updateRain(dt);
+    updateCameraShake(dt);
   }
-  // Agua: cada 3 frames en desktop (mejora #16), omitir en VR
+  // Agua: cada 3 frames en desktop, omitir en VR
   if (!renderer.xr.isPresenting && (++_waterFrame % 3 === 0)) updateWater(elapsed);
   // Minimapa: en VR actualizar cada 6 frames, en desktop cada frame
   if (!renderer.xr.isPresenting || Math.round(elapsed * 10) % 6 === 0) drawMinimap();
 
-  // Animate coins — InstancedMesh (mejoras #15 + #18 rise animation)
+  // Animate coins — InstancedMesh (coin magnet + rise animation)
   if (coinIM) {
+    let coinChanged = false;
     for (const s of stars) {
       if (s.rising) {
         s.riseT += dt;
@@ -2053,19 +2442,23 @@ renderer.setAnimationLoop(() => {
         coinDummy.scale.setScalar(1 - prog);
         coinDummy.rotation.set(0, 0, 0);
         if (prog >= 1) s.rising = false;
+        coinChanged = true;
       } else if (s.collected) {
         coinDummy.scale.setScalar(0);
         coinDummy.position.set(s.wx, s.baseY, s.wz);
         coinDummy.rotation.set(0, 0, 0);
+        coinChanged = true;
       } else {
         coinDummy.position.set(s.wx, s.baseY + Math.sin(elapsed * 2.5 + s.phase) * 0.18, s.wz);
         coinDummy.rotation.set(elapsed * 1.8 + s.phase, 0, 0);
         coinDummy.scale.setScalar(1);
+        coinChanged = true;
       }
       coinDummy.updateMatrix();
       coinIM.setMatrixAt(s.instIdx, coinDummy.matrix);
     }
-    coinIM.instanceMatrix.needsUpdate = true;
+    // Only flag needsUpdate when coins actually changed (optimización Part 3)
+    if (coinChanged) coinIM.instanceMatrix.needsUpdate = true;
   }
 
   // Animate hearts + pickup
@@ -2079,7 +2472,7 @@ renderer.setAnimationLoop(() => {
       hearts.splice(i, 1);
       playerHP = Math.min(5, playerHP + 1);
       updateHPBar();
-      sfx.hit();
+      sfx.heartPickup(); // mejora #16
     }
   }
 
@@ -2335,6 +2728,14 @@ function updateDragons(dt) {
       // Banco constante hacia adentro del viraje (CCW → inclina ala izq)
       d.mesh.rotation.z = -0.30;
 
+      // Torres visitadas (quest #2)
+      if (activeQuestId === 2 && !questComplete && distRoost < 8) {
+        towersVisited.add(d.roost.x + ',' + d.roost.z);
+        questProgress = towersVisited.size;
+        updateQuestHUD();
+        if (towersVisited.size >= 4) { questComplete = true; updateQuestHUD(); }
+      }
+
       // Disparo — solo cuando orbita al jugador
       if (nearPlayer) d.shootCooldown -= dt;
       if (nearPlayer && d.shootCooldown <= 0) {
@@ -2398,8 +2799,221 @@ function updateDragons(dt) {
         playerHP = Math.max(0, playerHP - 1);
         updateHPBar();
         flashDamage();                  // mejora #4: flash rojo
+        lastDamageTime = elapsed;
+        regenTimer = 0;
+        showFloatingDmg();
       }
     }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// INIT
+// ─────────────────────────────────────────────────────────────
+// NPCs — casas y personajes
+// ─────────────────────────────────────────────────────────────
+function spawnNPCs() {
+  npcs.length = 0;
+  const roofMat = new THREE.MeshLambertMaterial({ color: 0x2d5a1b, flatShading: true });
+  const doorMat = new THREE.MeshLambertMaterial({ color: 0x1a0f00 });
+  const eyeWMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+  const eyePMat = new THREE.MeshLambertMaterial({ color: 0x111111 });
+
+  NPC_DEFS.forEach((def, idx) => {
+    const wx = def.tx * TILE + TILE / 2;
+    const wz = def.tz * TILE + TILE / 2;
+    const gy = groundAt(wx, wz);
+
+    // ── Casa ──────────────────────────────────────────────────
+    const houseGroup = new THREE.Group();
+    houseGroup.position.set(wx, gy, wz);
+
+    const wallConfigs = [
+      { pos:[0, 1.2, -2.2], rot:[0, 0, 0],              scl:[3.8, 2.4, 0.5] },
+      { pos:[0, 1.2,  2.2], rot:[0, Math.PI, 0],        scl:[3.8, 2.4, 0.5] },
+      { pos:[-2.2, 1.2, 0], rot:[0, Math.PI/2, 0],      scl:[3.8, 2.4, 0.5] },
+      { pos:[ 2.2, 1.2, 0], rot:[0, -Math.PI/2, 0],     scl:[3.8, 2.4, 0.5] },
+    ];
+    wallConfigs.forEach(({ pos, rot, scl }) => {
+      const w = new THREE.Mesh(rockGeo, rockMat);
+      w.position.set(...pos);
+      w.rotation.set(...rot);
+      w.scale.set(...scl);
+      w.castShadow = w.receiveShadow = true;
+      houseGroup.add(w);
+    });
+
+    const door = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 1.5), doorMat);
+    door.position.set(0, 0.75, 2.21);
+    door.rotation.set(0, Math.PI, 0);
+    houseGroup.add(door);
+
+    const roof = new THREE.Mesh(new THREE.ConeGeometry(3.4, 2.0, 4, 1), roofMat);
+    roof.position.set(0, 3.2, 0);
+    roof.rotation.y = Math.PI / 4;
+    roof.castShadow = true;
+    houseGroup.add(roof);
+
+    scene.add(houseGroup);
+
+    // ── Personaje NPC ─────────────────────────────────────────
+    const npcGroup = new THREE.Group();
+    const bodyMat  = new THREE.MeshLambertMaterial({ color: def.color });
+
+    const bodyMesh = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.7, 0.3), bodyMat);
+    bodyMesh.position.y = 0.85;
+    npcGroup.add(bodyMesh);
+
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.28, 7, 5), bodyMat);
+    head.position.y = 1.48;
+    npcGroup.add(head);
+
+    [[-0.11, 0], [0.11, 0]].forEach(([ox]) => {
+      const sc = new THREE.Mesh(new THREE.SphereGeometry(0.07, 5, 4), eyeWMat);
+      sc.position.set(ox, 1.51, 0.22);
+      npcGroup.add(sc);
+      const pu = new THREE.Mesh(new THREE.SphereGeometry(0.042, 4, 3), eyePMat);
+      pu.position.set(ox, 1.51, 0.27);
+      npcGroup.add(pu);
+    });
+
+    const indGeo = new THREE.SphereGeometry(0.12, 5, 4);
+    const indMat = new THREE.MeshBasicMaterial({ color: 0xffff00 });
+    const indicator = new THREE.Mesh(indGeo, indMat);
+    indicator.position.y = 2.1;
+    npcGroup.add(indicator);
+
+    // Posicionar frente a la puerta
+    npcGroup.position.set(wx, gy, wz + 3.2);
+    npcGroup.rotation.y = Math.PI;
+    scene.add(npcGroup);
+
+    npcs.push({
+      mesh: npcGroup, indicator, body: bodyMesh,
+      wx, wz: wz + 3.2,
+      questId: def.questId, name: def.name,
+      bobPhase: idx * 1.3,
+    });
+  });
+}
+
+function updateNPCs(dt) {
+  const px = rig.position.x, pz = rig.position.z;
+  npcs.forEach(n => {
+    // Bob idle
+    n.body.position.y = 0.85 + Math.sin(elapsed * 1.5 + n.bobPhase) * 0.05;
+
+    // Rotate toward player when close (mejora #18), otherwise slow idle spin
+    const dx = px - n.wx, dz = pz - n.wz;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 5) {
+      // Face player
+      const targetY = Math.atan2(dx, dz);
+      n.mesh.rotation.y += (targetY - n.mesh.rotation.y) * Math.min(1, dt * 4);
+    } else {
+      n.mesh.rotation.y += dt * 0.4;
+    }
+
+    // Indicator bob
+    n.indicator.visible = dist < 5;
+    n.indicator.position.y = 2.1 + Math.sin(elapsed * 3 + n.bobPhase) * 0.12;
+
+    // Auto open dialog on proximity
+    if (dist < 3 && !dialogNPC) openDialog(n);
+    else if (dist > 5 && dialogNPC === n) closeDialog();
+  });
+
+  // Survive quest (quest #4)
+  if (activeQuestId === 4 && !questComplete) {
+    const nearEnemy = enemies.some(e => !e.dead && Math.hypot(
+      e.mesh.position.x - px, e.mesh.position.z - pz) < 10);
+    if (nearEnemy) {
+      surviveTimer += dt;
+      questProgress = Math.floor(surviveTimer);
+      updateQuestHUD();
+      if (surviveTimer >= 60) { questComplete = true; updateQuestHUD(); }
+    }
+  }
+
+  // Health regen (mejora #9): sin daño por 15s → +1HP cada 8s
+  if (playerHP > 0 && playerHP < 5) {
+    const timeSinceDmg = elapsed - lastDamageTime;
+    if (timeSinceDmg > 15) {
+      regenTimer += dt;
+      if (regenTimer >= 8) {
+        regenTimer = 0;
+        playerHP = Math.min(5, playerHP + 1);
+        updateHPBar();
+        sfx.heartPickup();
+      }
+    } else {
+      regenTimer = 0;
+    }
+  }
+
+  // Combo timer decay (mejora #15)
+  if (comboTimer > 0) {
+    comboTimer -= dt;
+    if (comboTimer <= 0) {
+      comboCount = 0;
+      if (comboEl) comboEl.style.display = 'none';
+    }
+  }
+
+  // Alert icons update (mejora #8)
+  for (let i = enemyAlertList.length - 1; i >= 0; i--) {
+    const a = enemyAlertList[i];
+    a.timer -= dt;
+    if (a.timer <= 0) {
+      scene.remove(a.mesh);
+      enemyAlertList.splice(i, 1);
+    } else {
+      a.mesh.position.y += dt * 0.8;
+      a.mesh.material.opacity = a.timer / 0.8;
+    }
+  }
+
+  // Death particles (mejora #14)
+  for (let i = dmgParticles.length - 1; i >= 0; i--) {
+    const p = dmgParticles[i];
+    p.life -= dt;
+    if (p.life <= 0) { scene.remove(p.mesh); dmgParticles.splice(i, 1); continue; }
+    p.vy -= 6 * dt;
+    p.mesh.position.x += p.vx * dt;
+    p.mesh.position.y += p.vy * dt;
+    p.mesh.position.z += p.vz * dt;
+    p.mesh.material.opacity = p.life / 0.5;
+  }
+
+  // Rock particles (mejora #19)
+  for (let i = rockParticles.length - 1; i >= 0; i--) {
+    const p = rockParticles[i];
+    p.life -= dt;
+    if (p.life <= 0) { scene.remove(p.mesh); rockParticles.splice(i, 1); continue; }
+    p.vy -= 4 * dt;
+    p.mesh.position.x += p.vx * dt;
+    p.mesh.position.y += p.vy * dt;
+    p.mesh.position.z += p.vz * dt;
+    p.mesh.material.opacity = p.life / 0.6;
+  }
+
+  // Fireflies (mejora #12)
+  for (const ff of fireflyList) {
+    ff.mesh.position.y = ff.baseY + Math.sin(elapsed * 1.8 + ff.phase) * 0.4;
+    ff.mesh.position.x = ff.wx   + Math.sin(elapsed * 1.2 + ff.phase + 1) * 0.5;
+    ff.mesh.position.z = ff.wz   + Math.cos(elapsed * 1.0 + ff.phase) * 0.5;
+    // Solo visible de noche
+    const isNight = dayTime < 0.25 || dayTime > 0.75;
+    ff.mesh.visible = isNight;
+  }
+
+  // Player shadow update (mejora #2)
+  if (playerShadow) {
+    playerShadow.position.set(
+      rig.position.x,
+      groundAt(rig.position.x, rig.position.z) + 0.02,
+      rig.position.z
+    );
   }
 }
 
@@ -2414,9 +3028,11 @@ function initGame() {
   spawnPushRocks();
   spawnRockTowers();
   spawnDragons();
+  spawnNPCs();
   buildMinimap();
   buildHUD();
   updateStarCounter();
+  updateQuestHUD();
 }
 
 // ─────────────────────────────────────────────────────────────
