@@ -1,6 +1,5 @@
 import * as THREE from 'three';
-import { VRButton }    from 'three/addons/webxr/VRButton.js';
-import { GLTFLoader }      from 'three/addons/loaders/GLTFLoader.js';
+import { VRButton }        from 'three/addons/webxr/VRButton.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 // ─────────────────────────────────────────────────────────────
@@ -68,7 +67,7 @@ function fbm(x, y, oct, s) {
 // ─────────────────────────────────────────────────────────────
 let worldMap  = [];
 let heightMap = [];
-let treeList  = [], rockList = [], starList = [];
+let rockList = [], starList = [];
 let worldSeed = 0;
 let stars = [];
 
@@ -77,7 +76,8 @@ const towerObstacles  = []; // { x, z, r } — colisión cilíndrica de torres
 const dragonRoosts    = []; // { x, z, topY } — cima de cada torre con dragón
 const dragons         = []; // objetos dragón activos
 const fireBalls       = []; // { mesh, vx, vy, vz, life } — bolas de fuego
-let rockGeo = null, rockMat = null; // set after GLB load
+const rockGeo = _makeRockGeo(42);
+const rockMat = new THREE.MeshLambertMaterial({ map: _makeRockTex(), flatShading: true });
 
 // ── Contadores y estado global ────────────────────────────────
 let coinsCollected = 0;    // monedas recogidas (evita filter() por frame)
@@ -91,8 +91,12 @@ const _tmpQ  = new THREE.Quaternion();
 const _tmpE  = new THREE.Euler();
 const _tmpV3 = new THREE.Vector3();
 const coinDummy = new THREE.Object3D(); // reutilizado para actualizar coinIM
-let treeLists = [[], [], []];             // [forestList, fieldList, mountainList]
-const treePartsList = [null, null, null]; // [{geo,mat}[]] per model — preserves multi-material
+let treeLists = [[], [], []];  // [forestList, fieldList, mountainList]
+const treePartsList = [
+  _buildTreeParts(42),  // pino tipo A: bosque + montaña
+  _buildTreeParts(97),  // pino tipo B: pradera (seed distinto → forma ligeramente diferente)
+  null,
+];
 
 // Fill a rectangular region with tile type t
 function paintRect(x0, z0, x1, z1, t) {
@@ -256,7 +260,7 @@ function generateMap() {
   worldMap[9][51] = T.PATH; // puerta sur (2 tiles de ancho)
 
   // ── TREE / ROCK / STAR LISTS ─────────────────────────────
-  treeList = []; rockList = []; starList = [];
+  rockList = []; starList = [];
   treeLists = [[], [], []];
   const STAR_TILES = new Set([T.GRASS, T.PATH, T.SAND, T.DFLOOR]);
   for (let z = 0; z < WORLD; z++) {
@@ -499,7 +503,7 @@ function buildScene() {
   for (let z = 0; z < WORLD; z++)
     for (let x = 0; x < WORLD; x++)
       if (worldMap[z][x] === T.DWALL) dwalls.push([x, z]);
-  if (dwalls.length && rockGeo) {
+  if (dwalls.length) {
     const WLAYERS = 5;                     // layers per wall tile
     const ROCKS_PER_ROW = 3;               // rocks side-by-side per layer
     // Geo after reshape: XZ = 0.85*0.80 = 0.68 m, Y = 0.85*1.20 = 1.02 m
@@ -548,10 +552,13 @@ function buildScene() {
           pz += (hash(x,          z + ri + ly*3, worldSeed + 61) - 0.5) * 0.05;
           const baseH = heightMap[z][x] ?? 0;
           const py = baseH + LAYER_H * ly;
+          // Variación sutil por roca: altura y rotación Y ligeramente distintas
+          const hVar = 0.90 + hash(x + ri * 3, z + ly * 7, worldSeed + 66) * 0.20;
+          const ry   = (hash(x + ri, z + ly + ri, worldSeed + 67) - 0.5) * 0.15;
           dummy.position.set(px, py, pz);
-          dummy.rotation.set(0, 0, 0);
-          if (type === 'corner') dummy.scale.set(CORNER_SCALE_XZ, WSCALE, CORNER_SCALE_XZ);
-          else                   dummy.scale.setScalar(WSCALE);
+          dummy.rotation.set(0, ry, 0);
+          if (type === 'corner') dummy.scale.set(CORNER_SCALE_XZ, WSCALE * hVar, CORNER_SCALE_XZ);
+          else                   dummy.scale.set(WSCALE, WSCALE * hVar, WSCALE);
           dummy.updateMatrix();
           wallIM.setMatrixAt(wi, dummy.matrix);
           wi++;
@@ -609,20 +616,17 @@ function buildScene() {
     }
   }
 
-  // ── DFLOOR — flat GLB rock slabs (same geo as walls) ─────────
-  if (rockGeo) {
-    const dfloors = [];
+  // ── DFLOOR — losas de roca (cubos planos)
+  { const dfloors = [];
     for (let z = 0; z < WORLD; z++)
       for (let x = 0; x < WORLD; x++)
         if (worldMap[z][x] === T.DFLOOR) dfloors.push([x, z]);
     if (dfloors.length) {
-      // Geo XZ = 0.68 m — scale to fill TILE; very flat in Y
       const FSCALE_XZ = (TILE * 0.97) / 0.68; // ≈ 4.28
       const floorIM = new THREE.InstancedMesh(rockGeo, rockMat, dfloors.length);
       floorIM.receiveShadow = true;
       dfloors.forEach(([x, z], i) => {
-        const thick = 0.14 + hash(x, z, worldSeed + 44) * 0.07; // slab thickness variety
-        // Rotate 0°/90°/180°/270° to break up repetition
+        const thick = 0.14 + hash(x, z, worldSeed + 44) * 0.07;
         const ry = Math.round(hash(x, z, worldSeed + 45) * 3) * (Math.PI / 2);
         dummy.position.set(x * TILE + TILE / 2, heightMap[z][x] ?? 0, z * TILE + TILE / 2);
         dummy.rotation.set(0, ry, 0);
@@ -635,14 +639,13 @@ function buildScene() {
     }
   }
 
-  // ── Trees — 3 GLB models placed by biome ────────────────────
-  const TREE_BASE = [2.5, 1.8, 2.5]; // min size
-  const TREE_VARY = [5.0, 4.5, 5.0]; // +random → wide range small→large
+  // ── Trees — árboles low-poly proceduales por bioma ───────────
+  const TREE_BASE = [1.2, 1.2, 1.2]; // tamaño mínimo
+  const TREE_VARY = [8.0, 7.0, 8.0]; // rango → 1.2 a 9.2 m (mezcla dramática grande/pequeño)
 
   treeLists.forEach((list, mi) => {
     const parts = treePartsList[mi];
     if (!list.length || !parts?.length) return;
-    // One InstancedMesh per GLB mesh-part so each part keeps its original material
     parts.forEach(({ geo, mat }) => {
       const im = new THREE.InstancedMesh(geo, mat, list.length);
       im.castShadow = im.receiveShadow = true;
@@ -650,8 +653,11 @@ function buildScene() {
         const wx = x * TILE + TILE / 2, wz = z * TILE + TILE / 2;
         const sc = TREE_BASE[mi] + hash(x, z, worldSeed + 77 + mi * 13) * TREE_VARY[mi];
         const ry = hash(x, z, worldSeed + 7  + mi * 17) * Math.PI * 2;
-        dummy.position.set(wx, groundAt(wx, wz) - sc * 0.06, wz); // bury roots slightly
-        dummy.rotation.set(0, ry, 0);
+        // Inclinación aleatoria suave — cada árbol se inclina en dirección distinta
+        const lx = (hash(x, z, worldSeed + 91) - 0.5) * 0.18;
+        const lz = (hash(x, z, worldSeed + 92) - 0.5) * 0.18;
+        dummy.position.set(wx, groundAt(wx, wz) - sc * 0.06, wz);
+        dummy.rotation.set(lx, ry, lz);
         dummy.scale.setScalar(sc);
         dummy.updateMatrix();
         im.setMatrixAt(i, dummy.matrix);
@@ -1455,7 +1461,6 @@ const ROCK_R     = 0.50 * ROCK_SCALE;   // 2.50 m collision radius
 const hearts = [];                       // corazones de vida en el suelo
 
 function spawnPushRocks() {
-  if (!rockGeo) return;
   const VALID = new Set([T.GRASS, T.MOUND, T.SAND]);
   for (let z = 2; z < WORLD - 2; z++) {
     for (let x = 2; x < WORLD - 2; x++) {
@@ -2085,7 +2090,6 @@ renderer.setAnimationLoop(() => {
 // ROCK TOWERS — torres cilíndricas de rocas GLB decorativas
 // ─────────────────────────────────────────────────────────────
 function spawnRockTowers() {
-  if (!rockGeo) return;
   const TOW_SC  = 1.6;                     // escala de cada roca de torre
   const ROCK_H  = 0.85 * 1.20 * TOW_SC;   // ≈ 1.63 m alto por roca escalada
   const VALID   = new Set([T.GRASS, T.MOUND, T.SAND]);
@@ -2303,38 +2307,37 @@ function updateDragons(dt) {
       if (distRoost < 12) { d.state = 'takeoff'; d.stateT = 0; sfx.birdScreech(); } // mejora #17
 
     } else if (d.state === 'takeoff') {
-      const tY = groundAt(px, pz) + EYE + 3.5;
-      d.mesh.position.y  += (tY - d.mesh.position.y) * Math.min(1, dt * 3);
-      d.mesh.position.x  += (px - d.mesh.position.x) * Math.min(1, dt * 1.8);
-      d.mesh.position.z  += (pz - d.mesh.position.z) * Math.min(1, dt * 1.8);
+      // Sube desde la cima de la torre hasta la altura de vuelo
+      const tY = d.roost.topY + 5.0;
+      d.mesh.position.y += (tY - d.mesh.position.y) * Math.min(1, dt * 3);
+      d.mesh.rotation.y  = d.orbitAngle - Math.PI / 2; // ya apunta en dirección de vuelo
       if (d.stateT > 0.9) { d.state = 'circling'; d.stateT = 0; }
 
     } else if (d.state === 'circling') {
-      d.orbitAngle += dt * 0.85;
-      const oR  = 5.5;
-      const tX  = px + Math.cos(d.orbitAngle) * oR;
-      const tZ  = pz + Math.sin(d.orbitAngle) * oR;
-      const tY  = groundAt(px, pz) + EYE + 3.2;
-      d.mesh.position.x += (tX - d.mesh.position.x) * Math.min(1, dt * 4.5);
-      d.mesh.position.y += (tY - d.mesh.position.y) * Math.min(1, dt * 3.0);
-      d.mesh.position.z += (tZ - d.mesh.position.z) * Math.min(1, dt * 4.5);
-      // El ave mira hacia el jugador
-      d.mesh.rotation.y = Math.atan2(
-        px - d.mesh.position.x,
-        pz - d.mesh.position.z
-      );
-      // Leve inclinación hacia abajo al mirar al jugador (pitch)
-      const dy = playerWorldY - d.mesh.position.y;
-      const dh = Math.sqrt(
-        (px - d.mesh.position.x) ** 2 + (pz - d.mesh.position.z) ** 2
-      ) || 1;
-      d.mesh.rotation.x = -Math.atan2(dy, dh) * 0.5;
-      // Balanceo al virar — el ave se inclina en el viraje (mejora #3)
-      d.mesh.rotation.z = -Math.sin(d.orbitAngle) * 0.22;
+      // Cerca del jugador → orbita al jugador (agresivo); lejos → orbita la torre (patrulla)
+      const nearPlayer = distRoost < 16;
+      const cx  = nearPlayer ? px                          : d.roost.x;
+      const cz  = nearPlayer ? pz                          : d.roost.z;
+      const oR  = nearPlayer ? 5.5                         : 6.5;
+      const oY  = nearPlayer ? groundAt(px, pz) + EYE + 3.5 : d.roost.topY + 5.0;
+      const spd = nearPlayer ? 1.1                         : 0.65;
 
-      // Disparo
-      d.shootCooldown -= dt;
-      if (d.shootCooldown <= 0) {
+      d.orbitAngle += dt * spd;
+      const tX = cx + Math.cos(d.orbitAngle) * oR;
+      const tZ = cz + Math.sin(d.orbitAngle) * oR;
+      d.mesh.position.x += (tX - d.mesh.position.x) * Math.min(1, dt * 4.5);
+      d.mesh.position.y += (oY - d.mesh.position.y) * Math.min(1, dt * 2.5);
+      d.mesh.position.z += (tZ - d.mesh.position.z) * Math.min(1, dt * 4.5);
+      // Mira en la dirección de vuelo (tangente al círculo)
+      d.mesh.rotation.y = d.orbitAngle - Math.PI / 2;
+      // Leve nariz abajo — postura de planeo
+      d.mesh.rotation.x = 0.07;
+      // Banco constante hacia adentro del viraje (CCW → inclina ala izq)
+      d.mesh.rotation.z = -0.30;
+
+      // Disparo — solo cuando orbita al jugador
+      if (nearPlayer) d.shootCooldown -= dt;
+      if (nearPlayer && d.shootCooldown <= 0) {
         d.shootCooldown = 2.0 + Math.random() * 1.5;
         const fMesh = new THREE.Mesh(_FIRE_GEO, _FIRE_MAT);
         // Origen del disparo desde la punta del pico en espacio mundo
@@ -2350,8 +2353,8 @@ function updateDragons(dt) {
           vx: fdx/fd*spd, vy: fdy/fd*spd, vz: fdz/fd*spd, life: 3.5 });
       }
 
-      // Retorna si el jugador se aleja demasiado de la torre
-      if (distRoost > 18) { d.state = 'returning'; d.stateT = 0; }
+      // Aterriza si el jugador se aleja mucho de la torre
+      if (distRoost > 28) { d.state = 'returning'; d.stateT = 0; }
 
     } else if (d.state === 'returning') {
       const tX = d.roost.x, tY = d.roost.topY + 5, tZ = d.roost.z;
@@ -2416,124 +2419,106 @@ function initGame() {
   updateStarCounter();
 }
 
-// ── Asset loading — all 4 GLBs in parallel, start when done ──
-let _assetsLeft = 3; // rock + tree_1 + tree_2
-function _onAsset() { if (--_assetsLeft === 0) initGame(); }
+// ─────────────────────────────────────────────────────────────
+// GENERADOR PROCEDURAL DE ROCAS — textura canvas + geometría jittered
+// ─────────────────────────────────────────────────────────────
 
-// Normalize a geometry to unit size with bottom at y = 0
-function _normGeo(gltf, { cubeReshape = false } = {}) {
-  const geos = [];
-  gltf.scene.traverse(child => {
-    if (child.isMesh) {
-      // Local space only — no matrixWorld so export rotations are not baked in
-      geos.push(child.geometry.clone());
-    }
-  });
-  if (!geos.length) return null;
-  let geo;
-  try { geo = geos.length === 1 ? geos[0] : mergeGeometries(geos); }
-  catch { geo = geos[0]; }
-  if (!geo) return null;
-  geo.computeBoundingBox();
-  const c = new THREE.Vector3();
-  geo.boundingBox.getCenter(c);
-  geo.translate(-c.x, -c.y, -c.z);
-  geo.computeBoundingBox();
-  const sz = new THREE.Vector3();
-  geo.boundingBox.getSize(sz);
-
-  // Trees only: auto-correct if model is lying on its side (Y is not tallest axis)
-  if (!cubeReshape) {
-    if (sz.z > sz.y + 0.05) {
-      // Trunk along Z → rotate -90° around X to stand upright
-      geo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
-      geo.computeBoundingBox();
-      geo.boundingBox.getSize(sz);
-    } else if (sz.x > sz.y + 0.05) {
-      // Trunk along X → rotate 90° around Z
-      geo.applyMatrix4(new THREE.Matrix4().makeRotationZ(Math.PI / 2));
-      geo.computeBoundingBox();
-      geo.boundingBox.getSize(sz);
-    }
+// Textura de roca pintada en canvas: base cálida + manchas + grano fino
+function _makeRockTex() {
+  const S = 128;
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = S;
+  const ctx = cv.getContext('2d');
+  const cl = v => Math.min(255, Math.max(0, Math.round(v)));
+  // Base gris-marrón cálido
+  ctx.fillStyle = '#9a8870';
+  ctx.fillRect(0, 0, S, S);
+  // Manchas gruesas (variación de brillo)
+  for (let i = 0; i < 55; i++) {
+    const x = Math.random() * S, y = Math.random() * S;
+    const r = 4 + Math.random() * 11;
+    const d = (Math.random() - 0.5) * 36;
+    ctx.fillStyle = `rgb(${cl(154+d)},${cl(136+d*0.87)},${cl(112+d*0.72)})`;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
   }
-
-  if (cubeReshape) {
-    // Rock: force each axis to 0.85 m then narrow XZ / stretch Y
-    geo.scale(0.85 / sz.x, 0.85 / sz.y, 0.85 / sz.z);
-    geo.scale(0.80, 1.20, 0.80);
-  } else {
-    // Tree: uniform scale → 1 m unit cube
-    const s = 1.0 / Math.max(sz.x, sz.y, sz.z);
-    geo.scale(s, s, s);
+  // Grano fino
+  for (let i = 0; i < 500; i++) {
+    const x = Math.random() * S, y = Math.random() * S;
+    const d = (Math.random() - 0.5) * 20;
+    ctx.fillStyle = `rgb(${cl(154+d)},${cl(136+d*0.87)},${cl(112+d*0.72)})`;
+    ctx.fillRect(x, y, 1 + Math.random() * 2, 1 + Math.random() * 2);
   }
-  geo.computeBoundingBox();
-  geo.translate(0, -geo.boundingBox.min.y, 0);
+  // Grietas — líneas oscuras finas
+  for (let i = 0; i < 6; i++) {
+    const x1 = Math.random() * S, y1 = Math.random() * S;
+    const x2 = x1 + (Math.random() - 0.5) * 30, y2 = y1 + (Math.random() - 0.5) * 30;
+    ctx.strokeStyle = `rgba(50,38,28,${0.25 + Math.random() * 0.30})`;
+    ctx.lineWidth = 0.8 + Math.random() * 1.2;
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  }
+  return new THREE.CanvasTexture(cv);
+}
+
+// Geometría cúbica con esquinas jittered — sin grietas (misma esquina → mismo jitter)
+function _makeRockGeo(seed) {
+  const geo = new THREE.BoxGeometry(0.68, 1.02, 0.68, 1, 1, 1);
+  const pos = geo.attributes.position;
+  // Agrupar vértices por posición original (el box comparte esquinas entre caras)
+  // y aplicar el mismo jitter a todos los vértices de la misma esquina
+  const cornerMap = new Map();
+  const jitters   = [];
+  for (let v = 0; v < pos.count; v++) {
+    const key = `${pos.getX(v).toFixed(3)},${pos.getY(v).toFixed(3)},${pos.getZ(v).toFixed(3)}`;
+    if (!cornerMap.has(key)) {
+      const ci = cornerMap.size;
+      cornerMap.set(key, ci);
+      jitters.push([
+        (hash(seed + ci, 0, 1) - 0.5) * 0.05,
+        (hash(seed + ci, 0, 2) - 0.5) * 0.04,
+        (hash(seed + ci, 0, 3) - 0.5) * 0.05,
+      ]);
+    }
+    const [jx, jy, jz] = jitters[cornerMap.get(key)];
+    pos.setXYZ(v, pos.getX(v) + jx, pos.getY(v) + jy, pos.getZ(v) + jz);
+  }
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
   return geo;
 }
 
-// PRUEBA: reemplazar todos los GLB por cubos/cilindros Three.js
-// para aislar si el glitch viene de los modelos importados
-rockGeo = new THREE.BoxGeometry(0.68, 1.02, 0.68);
-rockMat = new THREE.MeshLambertMaterial({ color: 0x9a8870 });
-_onAsset();
+// ─────────────────────────────────────────────────────────────
+// GENERADOR PROCEDURAL DE PINOS LOW-POLY
+// seed distinto → forma ligeramente diferente (tiers, radios, drift)
+// ─────────────────────────────────────────────────────────────
+function _buildTreeParts(seed) {
+  const trunkMat = new THREE.MeshLambertMaterial({ color: 0x5a3518, flatShading: true });
+  const leafMat  = new THREE.MeshLambertMaterial({ color: 0x1d7a22, flatShading: true });
 
-// Fix material for non-PBR lighting: if MeshStandardMaterial, clone and zero metalness
-// so diffuse color/texture/vertex-colors render correctly under ambient+directional lights.
-function _fixMat(mat) {
-  if (!mat.isMeshStandardMaterial) return mat;
-  const m = mat.clone();
-  m.metalness = 0;
-  m.roughness  = 0.8;
-  return m;
+  // Tronco — cilindro pentagonal esbelto
+  const trunkGeo = new THREE.CylinderGeometry(0.03, 0.09, 0.42, 5, 1);
+  trunkGeo.translate(0, 0.21, 0);
+
+  // Copa — conos apilados con drift acumulativo (curvatura natural)
+  const tiers = 3 + Math.floor(hash(seed, 0, 1) * 2); // 3-4 niveles
+  const coneParts = [];
+  let cx = 0, cz = 0; // posición acumulada del eje (deriva del árbol)
+  for (let i = 0; i < tiers; i++) {
+    const t   = i / tiers;
+    const r   = 0.46 - t * 0.30;
+    const h   = 0.38 + (hash(seed, i, 2) - 0.5) * 0.10;
+    const y   = 0.34 + i * 0.23;
+    const rot = i * Math.PI * 2 * 0.618; // ángulo dorado
+    const seg = 5 + (i & 1);
+    // Pequeño drift acumulativo → cada nivel se desplaza ligeramente del anterior
+    cx += (hash(seed, i, 14) - 0.5) * 0.05;
+    cz += (hash(seed, i, 15) - 0.5) * 0.05;
+    const cone = new THREE.ConeGeometry(r, h, seg, 1);
+    cone.rotateY(rot);
+    cone.translate(cx, y + h * 0.5, cz);
+    coneParts.push(cone);
+  }
+  const canopyGeo = mergeGeometries(coneParts);
+  return [{ geo: trunkGeo, mat: trunkMat }, { geo: canopyGeo, mat: leafMat }];
 }
 
-// Trees — preserve all per-mesh materials by keeping parts separate (no mergeGeometries)
-function _normTreeParts(gltf) {
-  const sceneInv = new THREE.Matrix4().copy(gltf.scene.matrixWorld).invert();
-  const parts = [];
-  gltf.scene.traverse(child => {
-    if (!child.isMesh) return;
-    const geo = child.geometry.clone();
-    // Put geometry in scene-root space (strips root export rotation, keeps relative positions)
-    geo.applyMatrix4(new THREE.Matrix4().multiplyMatrices(sceneInv, child.matrixWorld));
-    parts.push({ geo, mat: _fixMat(child.material) });
-  });
-  if (!parts.length) return null;
-
-  function combinedBox() {
-    const b = new THREE.Box3();
-    parts.forEach(p => { p.geo.computeBoundingBox(); b.union(p.geo.boundingBox); });
-    return b;
-  }
-
-  // Auto-correct if model is lying on its side
-  let box = combinedBox();
-  const sz = new THREE.Vector3(); box.getSize(sz);
-  let fix = null;
-  if (sz.z > sz.y + 0.05)      fix = new THREE.Matrix4().makeRotationX(-Math.PI / 2);
-  else if (sz.x > sz.y + 0.05) fix = new THREE.Matrix4().makeRotationZ( Math.PI / 2);
-  if (fix) {
-    parts.forEach(p => p.geo.applyMatrix4(fix));
-    box = combinedBox(); box.getSize(sz);
-  }
-
-  // Center and uniform scale to 1 m unit
-  const c = new THREE.Vector3(); box.getCenter(c);
-  const s = 1.0 / Math.max(sz.x, sz.y, sz.z);
-  parts.forEach(p => { p.geo.translate(-c.x, -c.y, -c.z); p.geo.scale(s, s, s); });
-
-  // Bottom at y = 0
-  box = combinedBox();
-  const minY = box.min.y;
-  parts.forEach(p => p.geo.translate(0, -minY, 0));
-
-  return parts;
-}
-
-// Árboles → cilindros simples
-treePartsList[0] = [{ geo: new THREE.CylinderGeometry(0.15, 0.25, 1, 6),
-                      mat: new THREE.MeshLambertMaterial({ color: 0x2d8c18 }) }];
-treePartsList[1] = [{ geo: new THREE.CylinderGeometry(0.15, 0.25, 1, 6),
-                      mat: new THREE.MeshLambertMaterial({ color: 0x5ab830 }) }];
-_onAsset();
-_onAsset();
+initGame();
