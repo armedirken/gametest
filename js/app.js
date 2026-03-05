@@ -63,12 +63,13 @@ function fbm(x, y, oct, s) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// WORLD GENERATION — Hyrule Light World (based on LTTP map)
+// WORLD GENERATION — Eryndell (mundo abierto original)
 // ─────────────────────────────────────────────────────────────
 let worldMap  = [];
 let heightMap = [];
 let rockList = [], starList = [];
 let worldSeed = 0;
+const _occupied = new Set(); // tiles ocupados: árboles + casas NPC → evitar intersecciones
 let stars = [];
 
 const pushRocks       = [];
@@ -90,7 +91,7 @@ const QUEST_DEFS = [
   { id:0, title:'Las Monedas Perdidas',    desc:'Recoge 30 monedas doradas\nesparcidas por el mundo.',   goal:30, type:'coins',   reward:'un amuleto de suerte' },
   { id:1, title:'Caza de Monstruos',       desc:'Elimina 5 slimes verdes\nque amenazan la aldea.',       goal:5,  type:'kills',   reward:'una espada mejorada' },
   { id:2, title:'Las Cuatro Torres',       desc:'Visita las 4 torres\nde piedra del mundo.',             goal:4,  type:'towers',  reward:'un libro de hechizos' },
-  { id:3, title:'El Gran Explorador',      desc:'Llega al interior\ndel Castillo de Hyrule.',            goal:1,  type:'castle',  reward:'una bolsa de monedas' },
+  { id:3, title:'El Gran Explorador',      desc:'Llega al interior\nde la Ciudadela Eryndell.',          goal:1,  type:'castle',  reward:'una bolsa de monedas' },
   { id:4, title:'El Último Superviviente', desc:'Sobrevive 60 segundos\ncon enemigos cerca.',            goal:60, type:'survive', reward:'el escudo legendario' },
 ];
 let activeQuestId  = -1;
@@ -102,6 +103,8 @@ let surviveTimer   = 0;
 let towersVisited  = new Set();
 let castleEntered  = false;
 let questHudEl     = null;
+let npcDlgCtx = null, npcDlgTex = null, npcDlgMesh = null;
+let _vrAWas   = false;
 
 // ── Mejoras globales ──────────────────────────────────────────
 let playerShadow   = null;
@@ -166,30 +169,30 @@ function generateMap() {
   paintRect(WORLD-1, 0, WORLD, WORLD, T.DEEP);
 
   // ── NORTH ─────────────────────────────────────────────────
-  // Death Mountain (rocky, north center)
+  // Monte Sombrío (rocoso, norte centro)
   paintRect(12, 2, 48, 14, T.MOUND);
   paintRect( 8, 2, 12,  9, T.MOUND);  // extends west
 
-  // Lost Woods / Skull Woods (dense forest, northwest)
+  // Bosque Eterno / Bosque Marchito (denso, noroeste)
   paintRect(2, 2, 18, 24, T.FOREST);
   paintRect(2, 24, 8, 40, T.FOREST);  // western forest strip
 
-  // Zora's Domain (water/ice, northeast)
+  // Lago Cristal (agua/hielo, noreste)
   paintRect(46, 2, 62, 16, T.WATER);
 
-  // Meseta NE — anula parte de Zora's Domain para el castillo de montaña
+  // Meseta NE — anula parte de Lago Cristal para el castillo de monte
   paintRect(40, 2, 60, 12, T.MOUND);
 
   // ── CENTER ────────────────────────────────────────────────
-  // Eastern mountains / Eastern Palace area (right side)
+  // Montañas del Este / Palacio de Piedra (lado derecho)
   paintRect(42, 14, 62, 30, T.MOUND);
   paintRect(44, 16, 60, 28, T.FOREST); // forest inside mountains
   paintRect(48, 18, 58, 26, T.MOUND);  // rocky core
 
-  // Kakariko Village area (left-center, open grass)
+  // Aldea Piedraverde (centro-izquierda, pradera abierta)
   paintRect(6, 18, 22, 36, T.GRASS);
 
-  // Southern open Hyrule fields
+  // Llanos del Sur de Eryndell
   paintRect(8, 34, 54, 48, T.GRASS);
 
   // ── SOUTH ─────────────────────────────────────────────────
@@ -200,11 +203,11 @@ function generateMap() {
   // Swamp / marshland (south center-left)
   paintRect(18, 50, 30, 62, T.WATER);
 
-  // Lake Hylia (large water body, south center-right)
+  // Lago Esmeralda (gran masa de agua, sur centro-derecha)
   paintRect(30, 46, 62, 62, T.WATER);
   paintRect(34, 48, 60, 62, T.DEEP);
 
-  // Small grass island in Lake Hylia (dungeon site)
+  // Islote en Lago Esmeralda (antigua mazmorra)
   paintRect(42, 52, 50, 58, T.GRASS);
 
   // ── HYRULE CASTLE + MOAT ─────────────────────────────────
@@ -222,8 +225,8 @@ function generateMap() {
   worldMap[21][30] = T.PATH;
   worldMap[21][31] = T.PATH;
 
-  // ── ZORA'S RIVER ─────────────────────────────────────────
-  // Diagonal water strip: Zora's Domain (col≈54,row≈10) → Lake Hylia (col≈34,row≈48)
+  // ── RÍO PLATEADO ─────────────────────────────────────────
+  // Franja diagonal: Lago Cristal (col≈54,row≈10) → Lago Esmeralda (col≈34,row≈48)
   for (let step = 0; step <= 40; step++) {
     const rz = 10 + Math.round(step * 38 / 40);
     const rx = 54 - Math.round(step * 20 / 40);
@@ -262,7 +265,7 @@ function generateMap() {
     }
   }
 
-  // ── Plateau pre-blur — meseta amplia NE para el castillo de Death Mountain ──
+  // ── Plateau pre-blur — meseta amplia NE para el castillo de Monte Sombrío ──
   const MFORT_H = 14;
   for (let z = 2; z < 12; z++)
     for (let x = 40; x < 62; x++)
@@ -303,32 +306,56 @@ function generateMap() {
   // ── TREE / ROCK / STAR LISTS ─────────────────────────────
   rockList = []; starList = [];
   treeLists = [[], [], []];
-  const STAR_TILES = new Set([T.GRASS, T.PATH, T.SAND, T.DFLOOR]);
+  _occupied.clear();
+
+  // Pre-bloquear footprint de casas NPC (±2 tiles alrededor del centro)
+  for (const def of NPC_DEFS) {
+    for (let dz = -2; dz <= 2; dz++)
+      for (let dx = -2; dx <= 2; dx++)
+        _occupied.add((def.tx + dx) + ',' + (def.tz + dz));
+  }
+
+  const STAR_TILES  = new Set([T.GRASS, T.PATH, T.SAND, T.DFLOOR]);
+  const PUSH_TILES  = new Set([T.GRASS, T.MOUND, T.SAND]);
+  const TOWER_TILES = new Set([T.GRASS, T.MOUND, T.SAND]);
+
   for (let z = 0; z < WORLD; z++) {
     for (let x = 0; x < WORLD; x++) {
-      const t = worldMap[z][x];
+      const t   = worldMap[z][x];
+      const key = x + ',' + z;
 
-      // Tree 0 — dense canopy (Lost Woods, eastern forest, western strip)
-      if (t === T.FOREST && hash(x, z, worldSeed+1) > 0.12)
-        treeLists[0].push([x, z]);
+      // Tree 0 — canopy denso (Bosque Eterno, bosque este, franja oeste)
+      if (t === T.FOREST && !_occupied.has(key) && hash(x, z, worldSeed+1) > 0.12) {
+        treeLists[0].push([x, z]); _occupied.add(key);
+      }
 
-      // Tree 1 — field / riverside (grass shores + open Hyrule fields)
-      if (t === T.GRASS) {
+      // Tree 1 — praderas / ribera (Llanos del Sur de Eryndell)
+      if (t === T.GRASS && !_occupied.has(key)) {
         const nearWater = [[z-1,x],[z+1,x],[z,x-1],[z,x+1]].some(
           ([nz,nx]) => nz>=0&&nz<WORLD&&nx>=0&&nx<WORLD &&
                        (worldMap[nz][nx]===T.WATER||worldMap[nz][nx]===T.DEEP));
-        if (hash(x, z, worldSeed+11) > (nearWater ? 0.68 : 0.88))
-          treeLists[1].push([x, z]);
+        if (hash(x, z, worldSeed+11) > (nearWater ? 0.68 : 0.88)) {
+          treeLists[1].push([x, z]); _occupied.add(key);
+        }
       }
 
-      // Tree 0 also covers mountain zones (tree_1 on highlands)
-      if (t === T.MOUND && hash(x, z, worldSeed+21) > 0.70)
-        treeLists[0].push([x, z]);
-      if (t === T.FOREST && (z < 14 || x > 40) && hash(x, z, worldSeed+22) > 0.55)
-        treeLists[0].push([x, z]);
+      // Tree 0 también en zonas de montaña
+      if (t === T.MOUND && !_occupied.has(key) && hash(x, z, worldSeed+21) > 0.70) {
+        treeLists[0].push([x, z]); _occupied.add(key);
+      }
+      if (t === T.FOREST && !_occupied.has(key) && (z < 14 || x > 40) && hash(x, z, worldSeed+22) > 0.55) {
+        treeLists[0].push([x, z]); _occupied.add(key);
+      }
 
       if ((t === T.MOUND || t === T.GRASS) && hash(x, z, worldSeed+2) > 0.87) rockList.push([x, z]);
-      if (starList.length < 30 && STAR_TILES.has(t) && hash(x, z, worldSeed+99) > 0.91) starList.push([x, z]);
+
+      // Monedas: saltar tiles con árbol, roca empujable o torre
+      if (starList.length < 30 && STAR_TILES.has(t) && !_occupied.has(key)
+          && hash(x, z, worldSeed+99) > 0.91
+          && !(PUSH_TILES.has(t)  && hash(x, z, worldSeed+88)  > 0.988)
+          && !(TOWER_TILES.has(t) && hash(x, z, worldSeed+777) > 0.988)) {
+        starList.push([x, z]);
+      }
     }
   }
 }
@@ -336,12 +363,12 @@ function generateMap() {
 function carvePaths() {
   const SAFE = t => t !== T.DEEP && t !== T.WATER && t !== T.DWALL && t !== T.DFLOOR;
 
-  // N-S main road: from castle south gate down through Hyrule fields
+  // Camino N-S: desde la puerta sur de la Ciudadela hacia los Llanos del Sur
   for (let z = 22; z < 48; z++) {
     if (SAFE(worldMap[z][30])) worldMap[z][30] = T.PATH;
     if (SAFE(worldMap[z][31])) worldMap[z][31] = T.PATH;
   }
-  // Road north: castle north gate toward Death Mountain
+  // Camino norte: puerta norte de la Ciudadela hacia Monte Sombrío
   for (let z = 2; z < 12; z++) {
     if (SAFE(worldMap[z][30])) worldMap[z][30] = T.PATH;
   }
@@ -350,29 +377,29 @@ function carvePaths() {
     if (SAFE(worldMap[10][x])) worldMap[10][x] = T.PATH;
   // Path north to castle south gate (x=50, z=9-10)
   if (SAFE(worldMap[9][50])) worldMap[9][50] = T.PATH;
-  // E-W road through central Hyrule
+  // Camino E-O central de Eryndell
   for (let x = 6; x < 56; x++) {
     if (SAFE(worldMap[34][x])) worldMap[34][x] = T.PATH;
   }
-  // Road to Kakariko Village (west branch, row 26)
+  // Camino a Aldea Piedraverde (ramal oeste)
   for (let x = 6; x < 22; x++) {
     if (SAFE(worldMap[26][x])) worldMap[26][x] = T.PATH;
   }
-  // Road east toward Eastern Palace (row 26, east side)
+  // Camino este hacia Palacio de Piedra (fila 26, lado este)
   for (let x = 32; x < 56; x++) {
     if (SAFE(worldMap[26][x])) worldMap[26][x] = T.PATH;
   }
 
   // ── Caminos a mazmorras ─────────────────────────────────────
-  // Skull Woods (NW): camino desde x=7 bajando hasta E-W road
+  // Bosque Marchito (NO): camino desde x=7 bajando hasta camino E-O
   for (let z = 9; z < 34; z++)
     if (SAFE(worldMap[z][7])) worldMap[z][7] = T.PATH;
-  // Eastern Palace (E): desde castillo este hasta palacio
+  // Palacio de Piedra (E): desde castillo este hasta palacio
   for (let x = 31; x < 50; x++)
     if (SAFE(worldMap[22][x])) worldMap[22][x] = T.PATH;
   for (let z = 23; z < 34; z++)
     if (SAFE(worldMap[z][50])) worldMap[z][50] = T.PATH;
-  // Desert Palace (SW): road este desde el palacio
+  // Torre de Arena (SO): camino este desde el palacio
   for (let x = 9; x < 30; x++)
     if (SAFE(worldMap[50][x])) worldMap[50][x] = T.PATH;
   // Swamp Palace (S-center): camino norte hasta E-W road
@@ -384,11 +411,11 @@ function carvePaths() {
 }
 
 function placeDungeons() {
-  // Fixed palace/dungeon locations — approximate LTTP positions
+  // Ubicaciones fijas de palacios/mazmorras de Eryndell
   const LOCS = [
-    { x:  4, z:  4, w: 7, h: 6 },  // Skull Woods (NW forest)
-    { x: 46, z: 18, w: 8, h: 7 },  // Eastern Palace (east mountains)
-    { x:  4, z: 48, w: 8, h: 6 },  // Desert Palace (SW desert)
+    { x:  4, z:  4, w: 7, h: 6 },  // Bosque Marchito (bosque NO)
+    { x: 46, z: 18, w: 8, h: 7 },  // Palacio de Piedra (montañas este)
+    { x:  4, z: 48, w: 8, h: 6 },  // Torre de Arena (desierto SO)
     // Ice Palace y Swamp Palace eliminados (estaban en el mar sin acceso)
   ];
   for (const d of LOCS) {
@@ -900,10 +927,21 @@ window.addEventListener('keydown', e => {
 window.addEventListener('keyup',   e => { delete keys[e.code]; });
 
 let yaw = 0, pitch = 0, pointerLocked = false;
+let mouseAttack = false, mouseShield = false;
+let pcSword = null, pcShield = null, pcSwordSwingT = 0;
 
 renderer.domElement.addEventListener('click', () => {
   if (!renderer.xr.isPresenting) renderer.domElement.requestPointerLock();
 });
+renderer.domElement.addEventListener('mousedown', e => {
+  if (!pointerLocked) return;
+  if (e.button === 0) { mouseAttack = true; setTimeout(() => { mouseAttack = false; }, 180); sfx.swing(); pcSwordSwingT = 0.22; }
+  if (e.button === 2) mouseShield = true;
+});
+renderer.domElement.addEventListener('mouseup', e => {
+  if (e.button === 2) mouseShield = false;
+});
+renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
 document.addEventListener('pointerlockchange', () => {
   pointerLocked = document.pointerLockElement === renderer.domElement;
 });
@@ -947,12 +985,19 @@ const TURN_SPEED = 1.6; // rad/s for smooth VR turning
 renderer.xr.addEventListener('sessionstart', () => {
   camera.position.set(0, 0, 0);
   // ── Optimizaciones Quest 2 ─────────────────────────────────
-  renderer.shadowMap.enabled      = false;          // mayor ganancia
+  renderer.shadowMap.enabled      = false;
   renderer.toneMapping            = THREE.LinearToneMapping;
   renderer.toneMappingExposure    = 1.0;
-  renderer.setPixelRatio(1);                        // evita resolución doble
+  renderer.setPixelRatio(1);
   if (isRaining) stopRain();
-  rainTimer = 999999;                               // sin lluvia en VR (costosa)
+  rainTimer = 999999;
+  // Ocultar HUD HTML — usar solo el HUD 3D en VR
+  const dh = document.getElementById('desktop-hud');
+  if (dh) dh.style.display = 'none';
+  if (hudMesh3d) hudMesh3d.visible = true;
+  if (npcDlgMesh) npcDlgMesh.visible = !!dialogNPC;
+  if (pcSword)  pcSword.visible  = false;
+  if (pcShield) pcShield.visible = false;
 });
 renderer.xr.addEventListener('sessionend', () => {
   camera.position.set(0, EYE, 0);
@@ -960,7 +1005,13 @@ renderer.xr.addEventListener('sessionend', () => {
   renderer.toneMapping            = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure    = 1.1;
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-  rainTimer = 60 + Math.random() * 60; // mejora #10: reanudar lluvia tras salir de VR
+  rainTimer = 60 + Math.random() * 60;
+  // Restaurar HUD HTML — ocultar HUD 3D en desktop
+  const dh = document.getElementById('desktop-hud');
+  if (dh) dh.style.display = '';
+  if (hudMesh3d) hudMesh3d.visible = false;
+  if (pcSword)  pcSword.visible  = true;
+  if (pcShield) pcShield.visible = true;
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -1031,7 +1082,7 @@ function createShield() {
   );
   g.add(rim);
 
-  // Triforce emblem (3 triangles)
+  // Emblema de los Tres Picos (3 triángulos)
   const triMat = new THREE.MeshLambertMaterial({
     color: 0xffc107, emissive: 0xff8800, emissiveIntensity: 0.4
   });
@@ -1402,12 +1453,17 @@ function createEnemy(gx, gz) {
 }
 
 function spawnEnemies() {
-  const SPAWN = new Set([T.GRASS, T.FOREST]);
+  const SPAWN      = new Set([T.GRASS, T.FOREST]);
+  const PUSH_TILES = new Set([T.GRASS, T.MOUND, T.SAND]);
   for (let z = 2; z < WORLD - 2; z++) {
     for (let x = 2; x < WORLD - 2; x++) {
-      if (SPAWN.has(worldMap[z][x]) && hash(x, z, worldSeed + 30) > 0.91) {
-        enemies.push(createEnemy(x, z));
-      }
+      const t   = worldMap[z][x];
+      const key = x + ',' + z;
+      if (!SPAWN.has(t)) continue;
+      if (_occupied.has(key)) continue;                              // árbol o casa NPC
+      if (PUSH_TILES.has(t) && hash(x, z, worldSeed + 88)  > 0.988) continue; // roca empujable
+      if (PUSH_TILES.has(t) && hash(x, z, worldSeed + 777) > 0.988) continue; // torre
+      if (hash(x, z, worldSeed + 30) > 0.91) enemies.push(createEnemy(x, z));
     }
   }
 }
@@ -1629,7 +1685,7 @@ function updateEnemies(dt) {
       }
     }
     // Space key hit (desktop)
-    if (keys['Space'] && dist < 2.5 && e.hitCooldown === 0) {
+    if ((keys['Space'] || mouseAttack) && dist < 2.5 && e.hitCooldown === 0) {
       e.hp--; e.hitCooldown = 0.5; sfx.hit();
       e.hitFlashT = 0.20; e.squashT = 0.12;
       if (e.hp <= 0) {
@@ -1697,7 +1753,8 @@ function spawnPushRocks() {
   const VALID = new Set([T.GRASS, T.MOUND, T.SAND]);
   for (let z = 2; z < WORLD - 2; z++) {
     for (let x = 2; x < WORLD - 2; x++) {
-      if (VALID.has(worldMap[z][x]) && hash(x, z, worldSeed + 88) > 0.988) {
+      if (VALID.has(worldMap[z][x]) && hash(x, z, worldSeed + 88) > 0.988
+          && !_occupied.has(x + ',' + z)) {
         const wx = x * TILE + TILE / 2, wz = z * TILE + TILE / 2;
         const mesh = new THREE.Mesh(rockGeo, rockMat);
         mesh.castShadow = mesh.receiveShadow = true;
@@ -1785,7 +1842,7 @@ function updatePushRocks(dt) {
           hit = true;
         }
       }
-      if (!hit && keys['Space']) {
+      if (!hit && (keys['Space'] || mouseAttack)) {
         const dx = r.mesh.position.x - rig.position.x;
         const dz = r.mesh.position.z - rig.position.z;
         const d  = Math.sqrt(dx * dx + dz * dz) || 1;
@@ -1890,7 +1947,7 @@ function isShieldActive() {
       }
     }
   }
-  return keys['ShiftLeft'] || keys['ShiftRight'];
+  return keys['ShiftLeft'] || keys['ShiftRight'] || mouseShield;
 }
 
 function showGameOver() {
@@ -1905,8 +1962,7 @@ function showGameOver() {
     <button onclick="location.reload()" style="font-size:18px;padding:12px 36px;background:#ff4444;color:#fff;border:none;border-radius:8px;cursor:pointer">▶ Jugar de nuevo</button>
   `;
   document.body.appendChild(el);
-  // 3D overlay visible inside VR headset
-  show3DOverlay('GAME OVER', 'Fuiste derrotado...', '#ff4444');
+  if (renderer.xr.isPresenting) show3DOverlay('GAME OVER', 'Fuiste derrotado...', '#ff4444');
 }
 
 function showVictory() {
@@ -1924,7 +1980,7 @@ function showVictory() {
     <button onclick="location.reload()" style="font-size:18px;padding:12px 36px;background:#ffd700;color:#000;border:none;border-radius:8px;cursor:pointer">▶ Jugar de nuevo</button>
   `;
   document.body.appendChild(el);
-  show3DOverlay('VICTORIA', `Enemigos: ${enemiesKilled} | ${mins}m ${secs}s`, '#ffd700');
+  if (renderer.xr.isPresenting) show3DOverlay('VICTORIA', `Enemigos: ${enemiesKilled} | ${mins}m ${secs}s`, '#ffd700');
 }
 
 let starEl;
@@ -2192,7 +2248,7 @@ function drawMinimap() {
 // ─────────────────────────────────────────────────────────────
 let hpBarEl;
 // 3D HUD canvas — works in desktop and VR
-let hudCtx3d = null, hudTex3d = null, mmTex3d = null;
+let hudCtx3d = null, hudTex3d = null, mmTex3d = null, hudMesh3d = null;
 
 function drawHUD3d() {
   if (!hudCtx3d) return;
@@ -2214,7 +2270,68 @@ function drawHUD3d() {
   ctx.fillStyle = '#ffd700';
   ctx.font = 'bold 40px sans-serif';
   ctx.fillText('● ' + col + ' / ' + stars.length, 326, 64);
+  // Misión activa (línea pequeña bajo las monedas)
+  if (activeQuestId !== -1) {
+    const q = QUEST_DEFS[activeQuestId];
+    const pct = Math.min(1, questProgress / q.goal);
+    const filled = Math.round(pct * 10);
+    ctx.font = '18px monospace';
+    ctx.fillStyle = questComplete ? '#44ff88' : '#ffd700';
+    ctx.fillText(q.title.slice(0, 22) + '  [' + '█'.repeat(filled) + '░'.repeat(10 - filled) + '] ' + questProgress + '/' + q.goal, 12, 110);
+  }
   if (hudTex3d) hudTex3d.needsUpdate = true;
+}
+
+function drawVRDialog(npc, isActive, isComplete) {
+  if (!npcDlgCtx) return;
+  const ctx = npcDlgCtx, W = 512, H = 256;
+  ctx.clearRect(0, 0, W, H);
+  // Fondo
+  ctx.fillStyle = 'rgba(0,0,0,0.88)';
+  if (ctx.roundRect) { ctx.roundRect(4, 4, W - 8, H - 8, 18); ctx.fill(); }
+  else ctx.fillRect(4, 4, W - 8, H - 8);
+  // Borde dorado
+  ctx.strokeStyle = '#ffd700'; ctx.lineWidth = 3;
+  if (ctx.roundRect) { ctx.roundRect(4, 4, W - 8, H - 8, 18); ctx.stroke(); }
+  const q = QUEST_DEFS[npc.questId];
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  // Nombre NPC
+  ctx.fillStyle = '#ffd700'; ctx.font = 'bold 36px sans-serif';
+  ctx.fillText(npc.name, W / 2, 14);
+  // Título misión
+  ctx.fillStyle = '#ffffff'; ctx.font = 'bold 22px sans-serif';
+  ctx.fillText(q.title, W / 2, 60);
+  if (isComplete) {
+    ctx.fillStyle = '#44ff88'; ctx.font = 'bold 24px sans-serif';
+    ctx.fillText('¡Misión completada!', W / 2, 102);
+    ctx.fillStyle = '#ffffff'; ctx.font = '20px sans-serif';
+    ctx.fillText('Recompensa: ' + q.reward, W / 2, 140);
+    ctx.fillStyle = '#aaaaaa'; ctx.font = '18px sans-serif';
+    ctx.fillText('[Trigger] Cerrar', W / 2, 218);
+  } else if (isActive) {
+    const pct = Math.min(1, questProgress / q.goal);
+    const filled = Math.round(pct * 16);
+    ctx.fillStyle = '#ffd700'; ctx.font = '20px monospace';
+    ctx.fillText('[' + '█'.repeat(filled) + '░'.repeat(16 - filled) + ']', W / 2, 104);
+    ctx.fillStyle = '#cccccc'; ctx.font = '20px sans-serif';
+    ctx.fillText(questProgress + ' / ' + q.goal, W / 2, 138);
+    ctx.fillStyle = '#aaaaaa'; ctx.font = '18px sans-serif';
+    ctx.fillText('[Trigger] Cerrar', W / 2, 218);
+  } else {
+    // Descripción con word-wrap
+    const words = q.desc.split(' ');
+    let line = '', y = 100;
+    ctx.fillStyle = '#cccccc'; ctx.font = '19px sans-serif';
+    for (const w of words) {
+      const test = line ? line + ' ' + w : w;
+      if (ctx.measureText(test).width > 460) { ctx.fillText(line, W / 2, y); line = w; y += 26; }
+      else line = test;
+    }
+    if (line) ctx.fillText(line, W / 2, y);
+    ctx.fillStyle = '#ffd700'; ctx.font = 'bold 18px sans-serif';
+    ctx.fillText('[Trigger] Aceptar', W / 2, 218);
+  }
+  if (npcDlgTex) npcDlgTex.needsUpdate = true;
 }
 
 function updateHPBar() {
@@ -2255,14 +2372,18 @@ function show3DOverlay(titleText, subText, titleColor) {
 }
 
 function updateQuestHUD() {
-  if (!questHudEl) return;
-  if (activeQuestId === -1) { questHudEl.style.display = 'none'; return; }
-  const q = QUEST_DEFS[activeQuestId];
-  questHudEl.style.display = 'block';
-  const pct = Math.min(1, questProgress / q.goal);
-  const filled = Math.round(pct * 12);
-  const bar = '\u2588'.repeat(filled) + '\u2591'.repeat(12 - filled);
-  questHudEl.textContent = q.title + '  [' + bar + ']  ' + questProgress + '/' + q.goal;
+  if (questHudEl) {
+    if (activeQuestId === -1) { questHudEl.style.display = 'none'; }
+    else {
+      const q = QUEST_DEFS[activeQuestId];
+      questHudEl.style.display = 'block';
+      const pct = Math.min(1, questProgress / q.goal);
+      const filled = Math.round(pct * 12);
+      const bar = '\u2588'.repeat(filled) + '\u2591'.repeat(12 - filled);
+      questHudEl.textContent = q.title + '  [' + bar + ']  ' + questProgress + '/' + q.goal;
+    }
+  }
+  drawHUD3d(); // actualiza barra de misión en HUD 3D (visible en VR)
 }
 
 function openDialog(npc) {
@@ -2271,6 +2392,8 @@ function openDialog(npc) {
   const q = QUEST_DEFS[npc.questId];
   const isActive   = activeQuestId === q.id;
   const isComplete = isActive && questComplete;
+  // Mostrar diálogo 3D solo en VR; en desktop usa el div HTML
+  if (npcDlgMesh && renderer.xr.isPresenting) { drawVRDialog(npc, isActive, isComplete); npcDlgMesh.visible = true; }
   let html = '<b style="color:#ffd700">' + npc.name + '</b><br><br>';
   if (isComplete) {
     html += '<b style="color:#44ff44">Mision completada!</b><br>Recibe: <i>' + q.reward + '</i>';
@@ -2292,6 +2415,7 @@ function openDialog(npc) {
 function closeDialog() {
   dialogNPC = null;
   if (npcDialogEl) npcDialogEl.style.display = 'none';
+  if (npcDlgMesh) npcDlgMesh.visible = false;
 }
 
 function acceptQuest(npc) {
@@ -2328,11 +2452,11 @@ function buildHUD() {
     'z-index:10', 'text-shadow:1px 1px 2px #000',
     'pointer-events:none',
   ].join(';');
+  el.id = 'desktop-hud';
   el.innerHTML = `
-    <div style="color:#7fff7f;font-size:15px;margin-bottom:3px">&#9876; Hyrule — Light World</div>
-    <div>WASD / Arrows &mdash; Move</div>
-    <div>Click canvas &mdash; Mouse look &nbsp;|&nbsp; Space &mdash; Attack &nbsp;|&nbsp; E &mdash; Hablar &nbsp;|&nbsp; M &mdash; Mapa</div>
-    <div>Left stick &mdash; Move (VR) &nbsp;|&nbsp; Swing right &mdash; Slash</div>
+    <div style="color:#7fff7f;font-size:15px;margin-bottom:3px">&#9876; Eryndell</div>
+    <div>WASD / Arrows &mdash; Move &nbsp;|&nbsp; Click &mdash; Mouse look</div>
+    <div>Clic izq &mdash; Atacar &nbsp;|&nbsp; Clic der &mdash; Escudo &nbsp;|&nbsp; E &mdash; Hablar &nbsp;|&nbsp; M &mdash; Mapa</div>
     <div id="hp" style="margin-top:6px;font-size:16px;color:#ff8888">♥♥♥♥♥</div>
     <div id="stars" style="font-size:14px;color:#ffd700;margin-top:3px">&#9733; 0 / 0</div>
   `;
@@ -2374,13 +2498,14 @@ function buildHUD() {
   hc.width = 512; hc.height = 128;
   hudCtx3d = hc.getContext('2d');
   hudTex3d = new THREE.CanvasTexture(hc);
-  const hm = new THREE.Mesh(
+  hudMesh3d = new THREE.Mesh(
     new THREE.PlaneGeometry(0.85, 0.21),
     new THREE.MeshBasicMaterial({ map: hudTex3d, transparent: true, depthTest: false })
   );
-  hm.position.set(0, -0.30, -0.75);
-  hm.renderOrder = 999;
-  camera.add(hm);
+  hudMesh3d.position.set(0, -0.30, -0.75);
+  hudMesh3d.renderOrder = 999;
+  hudMesh3d.visible = false; // solo visible en VR
+  camera.add(hudMesh3d);
 
   // Minimapa 3D en VR — esquina superior izquierda
   mmTex3d = new THREE.CanvasTexture(mmDisp);
@@ -2392,7 +2517,38 @@ function buildHUD() {
   mmMesh.renderOrder = 999;
   camera.add(mmMesh);
 
+  // 3D NPC dialog — visible in VR headset, attached to camera above HUD
+  const dc = document.createElement('canvas');
+  dc.width = 512; dc.height = 256;
+  npcDlgCtx = dc.getContext('2d');
+  npcDlgTex = new THREE.CanvasTexture(dc);
+  npcDlgMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.85, 0.43),
+    new THREE.MeshBasicMaterial({ map: npcDlgTex, transparent: true, depthTest: false })
+  );
+  npcDlgMesh.position.set(0, 0.08, -0.75);
+  npcDlgMesh.renderOrder = 999;
+  npcDlgMesh.visible = false;
+  camera.add(npcDlgMesh);
+
   drawHUD3d();
+
+  // ── Armas de PC (solo visibles en desktop, ocultas en VR) ────
+  pcSword = createSword();
+  // createSword ya aplica rotation.x = -PI/2; solo ajustamos Y y Z
+  pcSword.rotation.y = -0.18;
+  pcSword.rotation.z =  0.12;
+  pcSword.position.set(0.32, -0.36, -0.55);
+  // Siempre por encima de la escena (sin depth test)
+  pcSword.traverse(o => { if (o.isMesh) { o.material = o.material.clone(); o.material.depthTest = false; o.renderOrder = 998; } });
+  camera.add(pcSword);
+
+  pcShield = createShield();
+  // createShield aplica rotation.x = PI/2 internamente; solo ajustamos Y
+  pcShield.rotation.y = 0.35;
+  pcShield.position.set(-0.38, -0.30, -0.52);
+  pcShield.traverse(o => { if (o.isMesh) { o.material = o.material.clone(); o.material.depthTest = false; o.renderOrder = 998; } });
+  camera.add(pcShield);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2476,6 +2632,30 @@ renderer.setAnimationLoop(() => {
     }
   }
 
+  // ── Animación armas PC ────────────────────────────────────
+  if (!renderer.xr.isPresenting && pcSword) {
+    // Swing al atacar (Space o clic izq)
+    if ((keys['Space'] || mouseAttack) && pcSwordSwingT <= 0) pcSwordSwingT = 0.22;
+    if (pcSwordSwingT > 0) {
+      pcSwordSwingT = Math.max(0, pcSwordSwingT - dt);
+      const t = 1 - pcSwordSwingT / 0.22;
+      const swing = Math.sin(t * Math.PI);
+      pcSword.rotation.z = 0.12 - swing * 1.1;
+      pcSword.position.z = -0.55 - swing * 0.08;
+    } else {
+      pcSword.rotation.z = 0.12;
+      pcSword.position.z = -0.55;
+    }
+    // Escudo: sube y se centra al bloquear
+    if (pcShield) {
+      const blocking = mouseShield || keys['ShiftLeft'] || keys['ShiftRight'];
+      const tY  = blocking ? -0.12 : -0.30;
+      const tRY = blocking ?  0.05 :  0.35;
+      pcShield.position.y += (tY  - pcShield.position.y) * Math.min(1, dt * 14);
+      pcShield.rotation.y += (tRY - pcShield.rotation.y) * Math.min(1, dt * 14);
+    }
+  }
+
   renderer.render(scene, camera);
 });
 
@@ -2499,7 +2679,7 @@ function spawnRockTowers() {
           const t = worldMap[z + dz]?.[x + dx];
           if (t === T.DWALL || t === T.DFLOOR) nearCastle = true;
         }
-      if (!nearCastle) spots.push([x, z]);
+      if (!nearCastle && !_occupied.has(x + ',' + z)) spots.push([x, z]);
     }
   }
   if (!spots.length) return;
@@ -2663,13 +2843,18 @@ function spawnDragons() {
   for (const roost of dragonRoosts) {
     const { group, lWing, rWing, beakTip } = _createBirdMesh();
     group.rotation.order = 'YXZ';
-    group.position.set(roost.x, roost.topY + 0.6, roost.z);
+    const startAngle = Math.random() * Math.PI * 2;
+    group.position.set(
+      roost.x + Math.cos(startAngle) * 6.5,
+      roost.topY + 5.0,
+      roost.z + Math.sin(startAngle) * 6.5
+    );
     scene.add(group);
     dragons.push({
       mesh: group, lWing, rWing, beakTip, roost,
-      state: 'perched',       // perched | takeoff | circling | returning | landing
+      state: 'circling',      // circling only — siempre volando
       stateT: 0,
-      orbitAngle: Math.random() * Math.PI * 2,
+      orbitAngle: startAngle,
       shootCooldown: 1.5 + Math.random() * 2,
     });
   }
@@ -2684,98 +2869,53 @@ function updateDragons(dt) {
     const rx = px - d.roost.x, rz = pz - d.roost.z;
     const distRoost = Math.sqrt(rx * rx + rz * rz);
 
-    // Aleteo — más rápido y amplio en vuelo
-    const flapSpd = d.state === 'perched' ? 1.6 : 7.0;
-    const flapAmt = d.state === 'perched' ? 0.06 : 0.5;
-    const flapVal = Math.sin(elapsed * flapSpd + d.orbitAngle) * flapAmt;
-    // Ala izq sube cuando flapVal>0; ala der está en espejo (scale.x=-1) → se invierte
+    // Aleteo continuo en vuelo
+    const flapVal = Math.sin(elapsed * 7.0 + d.orbitAngle) * 0.5;
     d.lWing.rotation.z =  flapVal;
     d.rWing.rotation.z = -flapVal;
 
-    if (d.state === 'perched') {
-      d.mesh.position.set(d.roost.x,
-        d.roost.topY + 0.6 + Math.sin(elapsed * 1.2) * 0.05,
-        d.roost.z);
-      d.mesh.rotation.y += dt * 0.25;
-      if (distRoost < 12) { d.state = 'takeoff'; d.stateT = 0; sfx.birdScreech(); } // mejora #17
+    // Siempre en estado circling — orbita torre (lejos) o jugador (cerca)
+    const nearPlayer = distRoost < 16;
+    const cx  = nearPlayer ? px                           : d.roost.x;
+    const cz  = nearPlayer ? pz                           : d.roost.z;
+    const oR  = nearPlayer ? 5.5                          : 6.5;
+    const oY  = nearPlayer ? groundAt(px, pz) + EYE + 3.5 : d.roost.topY + 5.0;
+    const spd = nearPlayer ? 1.1                          : 0.65;
 
-    } else if (d.state === 'takeoff') {
-      // Sube desde la cima de la torre hasta la altura de vuelo
-      const tY = d.roost.topY + 5.0;
-      d.mesh.position.y += (tY - d.mesh.position.y) * Math.min(1, dt * 3);
-      d.mesh.rotation.y  = d.orbitAngle - Math.PI / 2; // ya apunta en dirección de vuelo
-      if (d.stateT > 0.9) { d.state = 'circling'; d.stateT = 0; }
+    d.orbitAngle += dt * spd;
+    const tX = cx + Math.cos(d.orbitAngle) * oR;
+    const tZ = cz + Math.sin(d.orbitAngle) * oR;
+    d.mesh.position.x += (tX - d.mesh.position.x) * Math.min(1, dt * 4.5);
+    d.mesh.position.y += (oY - d.mesh.position.y) * Math.min(1, dt * 2.5);
+    d.mesh.position.z += (tZ - d.mesh.position.z) * Math.min(1, dt * 4.5);
+    // Mira en la dirección de vuelo (tangente al círculo)
+    d.mesh.rotation.y = d.orbitAngle - Math.PI / 2;
+    d.mesh.rotation.x = 0.07;   // leve nariz abajo
+    d.mesh.rotation.z = -0.30;  // banco hacia adentro del viraje
 
-    } else if (d.state === 'circling') {
-      // Cerca del jugador → orbita al jugador (agresivo); lejos → orbita la torre (patrulla)
-      const nearPlayer = distRoost < 16;
-      const cx  = nearPlayer ? px                          : d.roost.x;
-      const cz  = nearPlayer ? pz                          : d.roost.z;
-      const oR  = nearPlayer ? 5.5                         : 6.5;
-      const oY  = nearPlayer ? groundAt(px, pz) + EYE + 3.5 : d.roost.topY + 5.0;
-      const spd = nearPlayer ? 1.1                         : 0.65;
+    // Torres visitadas (quest #2)
+    if (activeQuestId === 2 && !questComplete && distRoost < 8) {
+      towersVisited.add(d.roost.x + ',' + d.roost.z);
+      questProgress = towersVisited.size;
+      updateQuestHUD();
+      if (towersVisited.size >= 4) { questComplete = true; updateQuestHUD(); }
+    }
 
-      d.orbitAngle += dt * spd;
-      const tX = cx + Math.cos(d.orbitAngle) * oR;
-      const tZ = cz + Math.sin(d.orbitAngle) * oR;
-      d.mesh.position.x += (tX - d.mesh.position.x) * Math.min(1, dt * 4.5);
-      d.mesh.position.y += (oY - d.mesh.position.y) * Math.min(1, dt * 2.5);
-      d.mesh.position.z += (tZ - d.mesh.position.z) * Math.min(1, dt * 4.5);
-      // Mira en la dirección de vuelo (tangente al círculo)
-      d.mesh.rotation.y = d.orbitAngle - Math.PI / 2;
-      // Leve nariz abajo — postura de planeo
-      d.mesh.rotation.x = 0.07;
-      // Banco constante hacia adentro del viraje (CCW → inclina ala izq)
-      d.mesh.rotation.z = -0.30;
-
-      // Torres visitadas (quest #2)
-      if (activeQuestId === 2 && !questComplete && distRoost < 8) {
-        towersVisited.add(d.roost.x + ',' + d.roost.z);
-        questProgress = towersVisited.size;
-        updateQuestHUD();
-        if (towersVisited.size >= 4) { questComplete = true; updateQuestHUD(); }
-      }
-
-      // Disparo — solo cuando orbita al jugador
-      if (nearPlayer) d.shootCooldown -= dt;
-      if (nearPlayer && d.shootCooldown <= 0) {
-        d.shootCooldown = 2.0 + Math.random() * 1.5;
-        const fMesh = new THREE.Mesh(_FIRE_GEO, _FIRE_MAT);
-        // Origen del disparo desde la punta del pico en espacio mundo
-        const beakWorld = d.mesh.localToWorld(d.beakTip.clone());
-        fMesh.position.copy(beakWorld);
-        scene.add(fMesh);
-        const fdx = px - fMesh.position.x;
-        const fdy = playerWorldY - fMesh.position.y;
-        const fdz = pz - fMesh.position.z;
-        const fd  = Math.sqrt(fdx*fdx + fdy*fdy + fdz*fdz) || 1;
-        const spd = 11;
-        fireBalls.push({ mesh: fMesh,
-          vx: fdx/fd*spd, vy: fdy/fd*spd, vz: fdz/fd*spd, life: 3.5 });
-      }
-
-      // Aterriza si el jugador se aleja mucho de la torre
-      if (distRoost > 28) { d.state = 'returning'; d.stateT = 0; }
-
-    } else if (d.state === 'returning') {
-      const tX = d.roost.x, tY = d.roost.topY + 5, tZ = d.roost.z;
-      d.mesh.position.x += (tX - d.mesh.position.x) * Math.min(1, dt * 2.5);
-      d.mesh.position.y += (tY - d.mesh.position.y) * Math.min(1, dt * 2.5);
-      d.mesh.position.z += (tZ - d.mesh.position.z) * Math.min(1, dt * 2.5);
-      const dx = tX - d.mesh.position.x, dz = tZ - d.mesh.position.z;
-      if (Math.abs(dx) > 0.1 || Math.abs(dz) > 0.1)
-        d.mesh.rotation.y = Math.atan2(dx, dz);
-      const dist3 = Math.sqrt(dx*dx + (d.mesh.position.y-tY)**2 + dz*dz);
-      if (dist3 < 1.5)        { d.state = 'landing';  d.stateT = 0; }
-      if (distRoost < 12)     { d.state = 'circling'; d.stateT = 0; }
-
-    } else if (d.state === 'landing') {
-      const tX = d.roost.x, tY = d.roost.topY + 0.6, tZ = d.roost.z;
-      d.mesh.position.x += (tX - d.mesh.position.x) * Math.min(1, dt * 3.5);
-      d.mesh.position.y += (tY - d.mesh.position.y) * Math.min(1, dt * 3.5);
-      d.mesh.position.z += (tZ - d.mesh.position.z) * Math.min(1, dt * 3.5);
-      if (d.stateT > 1.2)  { d.state = 'perched';  d.stateT = 0; }
-      if (distRoost < 12)  { d.state = 'circling'; d.stateT = 0; }
+    // Disparo — solo cuando orbita al jugador
+    if (nearPlayer) d.shootCooldown -= dt;
+    if (nearPlayer && d.shootCooldown <= 0) {
+      d.shootCooldown = 2.0 + Math.random() * 1.5;
+      const fMesh = new THREE.Mesh(_FIRE_GEO, _FIRE_MAT);
+      const beakWorld = d.mesh.localToWorld(d.beakTip.clone());
+      fMesh.position.copy(beakWorld);
+      scene.add(fMesh);
+      const fdx = px - fMesh.position.x;
+      const fdy = playerWorldY - fMesh.position.y;
+      const fdz = pz - fMesh.position.z;
+      const fd  = Math.sqrt(fdx*fdx + fdy*fdy + fdz*fdz) || 1;
+      const fspd = 11;
+      fireBalls.push({ mesh: fMesh,
+        vx: fdx/fd*fspd, vy: fdy/fd*fspd, vz: fdz/fd*fspd, life: 3.5 });
     }
   }
 
@@ -2899,6 +3039,23 @@ function spawnNPCs() {
 
 function updateNPCs(dt) {
   const px = rig.position.x, pz = rig.position.z;
+
+  // VR: gatillo derecho (right trigger = buttons[0]) para aceptar/cerrar diálogo
+  // No usar A/X (buttons[4]) — queda cerca del thumbstick y causa conflictos
+  let vrAPressed = false;
+  const _sess = renderer.xr.getSession();
+  if (_sess?.inputSources) {
+    for (const s of _sess.inputSources) {
+      if (s.handedness === 'right' && s.gamepad?.buttons[0]?.pressed) vrAPressed = true;
+    }
+  }
+  if (vrAPressed && !_vrAWas && dialogNPC) {
+    const n = dialogNPC;
+    if (activeQuestId !== n.questId && !questComplete) acceptQuest(n);
+    else closeDialog();
+  }
+  _vrAWas = vrAPressed;
+
   npcs.forEach(n => {
     // Bob idle
     n.body.position.y = 0.85 + Math.sin(elapsed * 1.5 + n.bobPhase) * 0.05;
