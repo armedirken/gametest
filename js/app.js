@@ -80,19 +80,23 @@ const fireBalls       = []; // { mesh, vx, vy, vz, life } — bolas de fuego
 
 // ── NPCs y sistema de misiones ────────────────────────────────
 const npcs = [];
-// ── Aldea de Eryndell — bounds (tile coords) ──────────────────
-const VILLAGE_X0 = 19, VILLAGE_X1 = 35; // límite externo E-O
-const VILLAGE_Z0 = 26, VILLAGE_Z1 = 40; // límite externo N-S
-// Entradas: N/S en x=26-27; E en z=32-33
-const VILLAGE_N_ENT = new Set([26, 27]);
-const VILLAGE_E_ENT = new Set([32, 33]);
+// ── Aldea de Eryndell — configuración circular ────────────────
+const VILLAGE_CX         = 27;              // tile centro X
+const VILLAGE_CZ         = 33;              // tile centro Z
+const VILLAGE_R          = 8;               // radio del suelo (tiles)
+const VILLAGE_WALL_R     = 9;               // radio del muro  (tiles)
+// 3 entradas: Sur, Noroeste, Noreste (ángulos desde +X en plano XZ)
+const VILLAGE_ENT_ANGLES = [Math.PI / 2, Math.PI * 4 / 3, Math.PI * 5 / 3];
+const VILLAGE_ENT_HALF   = 0.22;            // semi-apertura por entrada (rad)
 
+// Posiciones en anillo circular radio=5 alrededor de (VILLAGE_CX=27, VILLAGE_CZ=33)
+// Ángulos: 0° E, 72° SE, 144° SW, 216° NW, 288° NE
 const NPC_DEFS = [
-  { tx:22, tz:30, name:'Aldeana',  color:0xff9999, questId:0 }, // NO del pueblo
-  { tx:32, tz:30, name:'Herrero',  color:0xaaaaff, questId:1 }, // NE del pueblo
-  { tx:22, tz:37, name:'Maga',     color:0xcc88ff, questId:2 }, // SO del pueblo
-  { tx:32, tz:37, name:'Mercader', color:0xffcc66, questId:3 }, // SE del pueblo
-  { tx:27, tz:38, name:'Ermitaño', color:0x99ffcc, questId:4 }, // Sur centro
+  { tx:32, tz:33, name:'Aldeana',  color:0xff9999, questId:0 }, // E
+  { tx:29, tz:38, name:'Herrero',  color:0xaaaaff, questId:1 }, // SE
+  { tx:23, tz:36, name:'Maga',     color:0xcc88ff, questId:2 }, // SW
+  { tx:23, tz:30, name:'Mercader', color:0xffcc66, questId:3 }, // NW
+  { tx:29, tz:28, name:'Ermitaño', color:0x99ffcc, questId:4 }, // NE
 ];
 const QUEST_DEFS = [
   { id:0, title:'Las Monedas Perdidas',    desc:'Recoge 30 monedas doradas\nesparcidas por el mundo.',   goal:30, type:'coins',   reward:'un amuleto de suerte' },
@@ -254,10 +258,12 @@ function generateMap() {
   // ── DUNGEONS / PALACES ────────────────────────────────────
   placeDungeons();
 
-  // ── ALDEA DE ERYNDELL — suelo PATH plano (altura = 0) ────
-  for (let z = VILLAGE_Z0; z <= VILLAGE_Z1; z++)
-    for (let x = VILLAGE_X0; x <= VILLAGE_X1; x++)
-      worldMap[z][x] = T.PATH;
+  // ── ALDEA DE ERYNDELL — suelo PATH circular plano ────────
+  for (let z = VILLAGE_CZ - VILLAGE_R - 1; z <= VILLAGE_CZ + VILLAGE_R + 1; z++)
+    for (let x = VILLAGE_CX - VILLAGE_R - 1; x <= VILLAGE_CX + VILLAGE_R + 1; x++) {
+      const _dx = x - VILLAGE_CX, _dz = z - VILLAGE_CZ;
+      if (_dx*_dx + _dz*_dz <= VILLAGE_R * VILLAGE_R) worldMap[z][x] = T.PATH;
+    }
 
   // ── HEIGHT MAP ───────────────────────────────────────────
   heightMap = [];
@@ -305,6 +311,15 @@ function generateMap() {
     heightMap = blurred;
   }
 
+  // ── Elevar suelo circular de la aldea — mínimo 0.5m para evitar filtración del océano ──
+  for (let z = VILLAGE_CZ - VILLAGE_R - 1; z <= VILLAGE_CZ + VILLAGE_R + 1; z++)
+    for (let x = VILLAGE_CX - VILLAGE_R - 1; x <= VILLAGE_CX + VILLAGE_R + 1; x++) {
+      if (z < 0 || z >= WORLD || x < 0 || x >= WORLD) continue;
+      const _dx = x - VILLAGE_CX, _dz = z - VILLAGE_CZ;
+      if (_dx*_dx + _dz*_dz <= VILLAGE_R * VILLAGE_R)
+        heightMap[z][x] = Math.max(heightMap[z][x], 0.5);
+    }
+
   // ── Castillo Montaña — castle NE en la meseta (14x7 tiles) ──
   for (let z = 3; z < 10; z++) {
     for (let x = 44; x < 58; x++) {
@@ -321,10 +336,12 @@ function generateMap() {
   treeLists = [[], [], []];
   _occupied.clear();
 
-  // Pre-bloquear toda la aldea + margen exterior (sin árboles ni rocas adentro)
-  for (let z = VILLAGE_Z0 - 1; z <= VILLAGE_Z1 + 1; z++)
-    for (let x = VILLAGE_X0 - 1; x <= VILLAGE_X1 + 1; x++)
-      _occupied.add(x + ',' + z);
+  // Pre-bloquear área circular de la aldea + margen (sin árboles ni rocas adentro)
+  for (let z = VILLAGE_CZ - VILLAGE_R - 2; z <= VILLAGE_CZ + VILLAGE_R + 2; z++)
+    for (let x = VILLAGE_CX - VILLAGE_R - 2; x <= VILLAGE_CX + VILLAGE_R + 2; x++) {
+      const _dx = x - VILLAGE_CX, _dz = z - VILLAGE_CZ;
+      if (_dx*_dx + _dz*_dz <= (VILLAGE_R + 1) * (VILLAGE_R + 1)) _occupied.add(x + ',' + z);
+    }
 
   const STAR_TILES  = new Set([T.GRASS, T.PATH, T.SAND, T.DFLOOR]);
   const PUSH_TILES  = new Set([T.GRASS, T.MOUND, T.SAND]);
@@ -2694,13 +2711,25 @@ renderer.setAnimationLoop(() => {
     if ((keys['Space'] || mouseAttack) && pcSwordSwingT <= 0) pcSwordSwingT = 0.22;
     if (pcSwordSwingT > 0) {
       pcSwordSwingT = Math.max(0, pcSwordSwingT - dt);
-      const t = 1 - pcSwordSwingT / 0.22;
-      const swing = Math.sin(t * Math.PI);
-      pcSword.rotation.z = 0.12 - swing * 1.1;
-      pcSword.position.z = -0.55 - swing * 0.08;
+      const t = 1 - pcSwordSwingT / 0.22; // 0 → 1
+      if (t < 0.20) {
+        // Wind-up: subir la espada y echar atrás
+        const p = t / 0.20;
+        pcSword.position.set(0.32, -0.36 + p * 0.45, -0.55 + p * 0.06);
+        pcSword.rotation.y = -0.18 - p * 0.25;
+        pcSword.rotation.z =  0.12 + p * 0.35;
+      } else {
+        // Tajo: bajar rápido y al frente
+        const p = (t - 0.20) / 0.80;
+        const ep = 1 - Math.pow(1 - p, 2); // ease-out para velocidad inicial alta
+        pcSword.position.set(0.32, 0.09 - ep * 0.60, -0.49 - ep * 0.12);
+        pcSword.rotation.y = -0.43 + ep * 0.30;
+        pcSword.rotation.z =  0.47 - ep * 1.25;
+      }
     } else {
-      pcSword.rotation.z = 0.12;
-      pcSword.position.z = -0.55;
+      pcSword.position.set(0.32, -0.36, -0.55);
+      pcSword.rotation.y = -0.18;
+      pcSword.rotation.z =  0.12;
     }
     // Escudo: sube y se centra al bloquear
     if (pcShield) {
@@ -3021,8 +3050,14 @@ function spawnNPCs() {
     const gy = groundAt(wx, wz);
 
     // ── Casa ──────────────────────────────────────────────────
+    // Rotar para que la puerta (+Z local) apunte al centro de la aldea
+    const _vcx = VILLAGE_CX * TILE + TILE / 2;
+    const _vcz = VILLAGE_CZ * TILE + TILE / 2;
+    const _hrot = Math.atan2(_vcx - wx, _vcz - wz); // atan2(dX, dZ) para rotación Y
+
     const houseGroup = new THREE.Group();
     houseGroup.position.set(wx, gy, wz);
+    houseGroup.rotation.y = _hrot;
 
     const wallConfigs = [
       { pos:[0, 1.2, -2.2], rot:[0, 0, 0],              scl:[3.8, 2.4, 0.5] },
@@ -3079,14 +3114,15 @@ function spawnNPCs() {
     indicator.position.y = 2.1;
     npcGroup.add(indicator);
 
-    // Posicionar frente a la puerta
-    npcGroup.position.set(wx, gy, wz + 3.2);
-    npcGroup.rotation.y = Math.PI;
+    // Posicionar frente a la puerta (en la dirección que apunta la puerta)
+    const _dsx = Math.sin(_hrot), _dsz = Math.cos(_hrot);
+    npcGroup.position.set(wx + _dsx * 3.2, gy, wz + _dsz * 3.2);
+    npcGroup.rotation.y = _hrot + Math.PI; // NPC mira hacia la puerta
     scene.add(npcGroup);
 
     npcs.push({
       mesh: npcGroup, indicator, body: bodyMesh,
-      wx, wz: wz + 3.2,
+      wx: wx + _dsx * 3.2, wz: wz + _dsz * 3.2,
       questId: def.questId, name: def.name,
       bobPhase: idx * 1.3,
     });
@@ -3117,41 +3153,36 @@ function _makeSignTex() {
 }
 
 function spawnVillage() {
-  // ── Muro perimetral con rockGeo ─────────────────────────────
-  // rockGeo base: 0.68 × 1.02 × 0.68 m  → escalar para llenar 1 TILE × 2.5m × 1m
-  const SX = TILE / 0.68;       // ~4.41  ancho = 1 tile (3m)
-  const SY = 2.5  / 1.02;       // ~2.45  alto  = 2.5m
-  const SZ = 1.0  / 0.68;       // ~1.47  fondo = 1m
+  const VCX = VILLAGE_CX * TILE + TILE / 2; // centro mundo X
+  const VCZ = VILLAGE_CZ * TILE + TILE / 2; // centro mundo Z
+  const wallWorldR = VILLAGE_WALL_R * TILE;  // radio del muro en metros
 
-  const wallSegs = [];
+  // ── Muro circular con rockGeo (InstancedMesh) ────────────────
+  // rockGeo: 0.68×1.02×0.68 m → escalar a 1 TILE × 2.5m × 1m
+  const SX = TILE / 0.68;  // ~4.41 — ancho tangencial = 1 tile
+  const SY = 2.5  / 1.02;  // ~2.45 — alto = 2.5m
+  const SZ = 1.0  / 0.68;  // ~1.47 — fondo radial = 1m
 
-  // Muro Norte (z = VILLAGE_Z0)
-  for (let x = VILLAGE_X0; x <= VILLAGE_X1; x++) {
-    if (VILLAGE_N_ENT.has(x)) continue; // entrada norte
-    wallSegs.push({ tx: x, tz: VILLAGE_Z0, rotY: 0 });
-  }
-  // Muro Sur (z = VILLAGE_Z1)
-  for (let x = VILLAGE_X0; x <= VILLAGE_X1; x++) {
-    if (VILLAGE_N_ENT.has(x)) continue; // entrada sur
-    wallSegs.push({ tx: x, tz: VILLAGE_Z1, rotY: 0 });
-  }
-  // Muro Oeste (x = VILLAGE_X0)
-  for (let z = VILLAGE_Z0 + 1; z < VILLAGE_Z1; z++)
-    wallSegs.push({ tx: VILLAGE_X0, tz: z, rotY: Math.PI / 2 });
-  // Muro Este (x = VILLAGE_X1)
-  for (let z = VILLAGE_Z0 + 1; z < VILLAGE_Z1; z++) {
-    if (VILLAGE_E_ENT.has(z)) continue; // entrada este
-    wallSegs.push({ tx: VILLAGE_X1, tz: z, rotY: Math.PI / 2 });
+  const N_SEGS = 56;
+  const wallAngles = [];
+  for (let i = 0; i < N_SEGS; i++) {
+    const angle = (i / N_SEGS) * Math.PI * 2;
+    const nearEnt = VILLAGE_ENT_ANGLES.some(ea => {
+      let d = Math.abs(angle - ea);
+      if (d > Math.PI) d = Math.PI * 2 - d;
+      return d < VILLAGE_ENT_HALF;
+    });
+    if (!nearEnt) wallAngles.push(angle);
   }
 
-  const wIM = new THREE.InstancedMesh(rockGeo, rockMat, wallSegs.length);
+  const wIM = new THREE.InstancedMesh(rockGeo, rockMat, wallAngles.length);
   wIM.castShadow = wIM.receiveShadow = true;
   const wd = new THREE.Object3D();
-  wallSegs.forEach(({ tx, tz, rotY }, i) => {
-    const wx = tx * TILE + TILE / 2;
-    const wz = tz * TILE + TILE / 2;
+  wallAngles.forEach((angle, i) => {
+    const wx = VCX + wallWorldR * Math.cos(angle);
+    const wz = VCZ + wallWorldR * Math.sin(angle);
     wd.position.set(wx, groundAt(wx, wz) + 1.25, wz);
-    wd.rotation.set(0, rotY, 0);
+    wd.rotation.set(0, Math.PI / 2 + angle, 0); // tangencial al círculo
     wd.scale.set(SX, SY, SZ);
     wd.updateMatrix();
     wIM.setMatrixAt(i, wd.matrix);
@@ -3159,30 +3190,49 @@ function spawnVillage() {
   wIM.instanceMatrix.needsUpdate = true;
   scene.add(wIM);
 
+  // ── Fuente en el centro de la plaza ─────────────────────────
+  const fy = groundAt(VCX, VCZ);
+  const stoneMat = new THREE.MeshLambertMaterial({ color: 0x999999, flatShading: true });
+  const waterMat = new THREE.MeshLambertMaterial({ color: 0x29b6e8, emissive: 0x0055aa, emissiveIntensity: 0.4 });
+  const jetMat   = new THREE.MeshLambertMaterial({ color: 0x55ccff, transparent: true, opacity: 0.60 });
+
+  const fbase = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 2.5, 0.5, 14), stoneMat);
+  fbase.position.set(VCX, fy + 0.25, VCZ); fbase.castShadow = true; scene.add(fbase);
+
+  const fwater = new THREE.Mesh(new THREE.CylinderGeometry(1.85, 1.85, 0.32, 14), waterMat);
+  fwater.position.set(VCX, fy + 0.66, VCZ); scene.add(fwater);
+
+  const fcol = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.24, 1.3, 8), stoneMat);
+  fcol.position.set(VCX, fy + 1.15, VCZ); fcol.castShadow = true; scene.add(fcol);
+
+  // Chorro (cono invertido — ancho arriba, estrecho abajo)
+  const fjet = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.05, 1.0, 8), jetMat);
+  fjet.position.set(VCX, fy + 2.15, VCZ); scene.add(fjet);
+
   // ── Carteles en las 3 entradas ──────────────────────────────
-  const signTex  = _makeSignTex();
-  const signMat  = new THREE.MeshLambertMaterial({ color: 0x5a3518 });
-  const boardMat = new THREE.MeshBasicMaterial({ map: signTex });
-  const postGeo  = new THREE.CylinderGeometry(0.07, 0.10, 2.4, 6);
-  const boardGeo = new THREE.BoxGeometry(2.4, 0.75, 0.12);
+  const signTex    = _makeSignTex();
+  const signPostMat = new THREE.MeshLambertMaterial({ color: 0x5a3518 });
+  const boardMat   = new THREE.MeshBasicMaterial({ map: signTex });
+  const postGeo    = new THREE.CylinderGeometry(0.07, 0.10, 2.0, 6); // 2m — sin solapar tablero
+  const boardGeo   = new THREE.BoxGeometry(2.4, 0.75, 0.12);
 
   function makeSign(wx, wz, rotY) {
     const g = new THREE.Group();
-    const post = new THREE.Mesh(postGeo, signMat);
-    post.position.y = 1.2;
+    const post = new THREE.Mesh(postGeo, signPostMat);
+    post.position.y = 1.0; // base 0 → tope 2m
     g.add(post);
     const board = new THREE.Mesh(boardGeo, boardMat);
-    board.position.y = 2.55;
+    board.position.y = 2.48; // 2m + 0.375 (mitad) + 0.1 margen
     g.add(board);
     g.position.set(wx, groundAt(wx, wz), wz);
     g.rotation.y = rotY;
     scene.add(g);
   }
 
-  const signCX = 27 * TILE + TILE / 2; // centro X de la entrada N/S
-  makeSign(signCX, (VILLAGE_Z0 - 1) * TILE + TILE / 2, 0);                         // Norte
-  makeSign(signCX, (VILLAGE_Z1 + 1) * TILE + TILE / 2, Math.PI);                   // Sur
-  makeSign((VILLAGE_X1 + 1) * TILE + TILE / 2, 33 * TILE + TILE / 2, Math.PI / 2); // Este
+  const signR = wallWorldR + 2.5; // ligeramente fuera del muro
+  VILLAGE_ENT_ANGLES.forEach(ea => {
+    makeSign(VCX + signR * Math.cos(ea), VCZ + signR * Math.sin(ea), ea);
+  });
 }
 
 function updateNPCs(dt) {
