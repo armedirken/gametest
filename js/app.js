@@ -94,9 +94,10 @@ const QUEST_DEFS = [
   { id:3, title:'El Gran Explorador',      desc:'Llega al interior\nde la Ciudadela Eryndell.',          goal:1,  type:'castle',  reward:'una bolsa de monedas' },
   { id:4, title:'El Último Superviviente', desc:'Sobrevive 60 segundos\ncon enemigos cerca.',            goal:60, type:'survive', reward:'el escudo legendario' },
 ];
-let activeQuestId  = -1;
-let questProgress  = 0;
-let questComplete  = false;
+let activeQuestId   = -1;
+let questProgress   = 0;
+let questComplete   = false;
+let questsCompleted = 0; // total de misiones entregadas
 let npcDialogEl    = null;
 let dialogNPC      = null;
 let surviveTimer   = 0;
@@ -1974,7 +1975,7 @@ function showVictory() {
   const mins = Math.floor(elapsed / 60), secs = Math.floor(elapsed % 60);
   el.innerHTML = `
     <div style="font-size:52px;color:#ffd700;margin-bottom:16px;text-shadow:0 0 20px #fa0">★ VICTORIA ★</div>
-    <div style="font-size:20px;margin-bottom:8px;opacity:.8">¡Recolectaste 10 monedas!</div>
+    <div style="font-size:20px;margin-bottom:8px;opacity:.8">¡Completaste todas las misiones!</div>
     <div style="font-size:15px;margin-bottom:4px;color:#ffd700;opacity:.7">Enemigos derrotados: ${enemiesKilled}</div>
     <div style="font-size:15px;margin-bottom:32px;color:#aaf;opacity:.8">Tiempo: ${mins}m ${secs}s</div>
     <button onclick="location.reload()" style="font-size:18px;padding:12px 36px;background:#ffd700;color:#000;border:none;border-radius:8px;cursor:pointer">▶ Jugar de nuevo</button>
@@ -2019,7 +2020,6 @@ function checkStarCollection() {
   }
   if (anyNew) {
     updateStarCounter();
-    if (coinsCollected >= 10) showVictory();
   }
 }
 
@@ -2399,8 +2399,10 @@ function openDialog(npc) {
     html += '<b style="color:#44ff44">Mision completada!</b><br>Recibe: <i>' + q.reward + '</i>';
     sfx.questComplete();
     activeQuestId = -1; questProgress = 0; questComplete = false;
+    questsCompleted++;
     updateQuestHUD();
     showQuestCompleteOverlay(q);
+    if (questsCompleted >= QUEST_DEFS.length) showVictory();
   } else if (isActive) {
     html += '<b>' + q.title + '</b><br><br>' + q.desc.replace(/\n/g, '<br>') + '<br><br>Progreso: ' + questProgress + '/' + q.goal;
   } else {
