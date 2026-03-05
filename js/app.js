@@ -2471,18 +2471,11 @@ function _normGeo(gltf, { cubeReshape = false } = {}) {
   return geo;
 }
 
-const _loader = new GLTFLoader();
-
-// Rock
-_loader.load('assets/models/low_poly_rock.glb', gltf => {
-  rockGeo = _normGeo(gltf, { cubeReshape: true }) ?? new THREE.BoxGeometry(0.85, 0.85, 0.85);
-  rockMat = new THREE.MeshLambertMaterial({ color: 0x9a8870 });
-  _onAsset();
-}, undefined, () => {
-  rockGeo = new THREE.BoxGeometry(0.85, 0.85, 0.85);
-  rockMat = new THREE.MeshLambertMaterial({ color: 0x9a8870 });
-  _onAsset();
-});
+// PRUEBA: reemplazar todos los GLB por cubos/cilindros Three.js
+// para aislar si el glitch viene de los modelos importados
+rockGeo = new THREE.BoxGeometry(0.68, 1.02, 0.68);
+rockMat = new THREE.MeshLambertMaterial({ color: 0x9a8870 });
+_onAsset();
 
 // Fix material for non-PBR lighting: if MeshStandardMaterial, clone and zero metalness
 // so diffuse color/texture/vertex-colors render correctly under ambient+directional lights.
@@ -2537,16 +2530,10 @@ function _normTreeParts(gltf) {
   return parts;
 }
 
-const _fbColors = [0x2d8c18, 0x5ab830];
-['low_poly_tree_1.glb', 'low_poly_tree_2.glb'].forEach((name, i) => {
-  _loader.load(`assets/models/${name}`, gltf => {
-    treePartsList[i] = _normTreeParts(gltf) ??
-      [{ geo: new THREE.CylinderGeometry(0.15, 0.25, 1, 6),
-         mat: new THREE.MeshLambertMaterial({ color: _fbColors[i] }) }];
-    _onAsset();
-  }, undefined, () => {
-    treePartsList[i] = [{ geo: new THREE.CylinderGeometry(0.15, 0.25, 1, 6),
-                          mat: new THREE.MeshLambertMaterial({ color: _fbColors[i] }) }];
-    _onAsset();
-  });
-});
+// Árboles → cilindros simples
+treePartsList[0] = [{ geo: new THREE.CylinderGeometry(0.15, 0.25, 1, 6),
+                      mat: new THREE.MeshLambertMaterial({ color: 0x2d8c18 }) }];
+treePartsList[1] = [{ geo: new THREE.CylinderGeometry(0.15, 0.25, 1, 6),
+                      mat: new THREE.MeshLambertMaterial({ color: 0x5ab830 }) }];
+_onAsset();
+_onAsset();
