@@ -78,6 +78,19 @@ const dragonRoosts    = []; // { x, z, topY } — cima de cada torre con dragón
 const dragons         = []; // objetos dragón activos
 const fireBalls       = []; // { mesh, vx, vy, vz, life } — bolas de fuego
 let rockGeo = null, rockMat = null; // set after GLB load
+
+// ── Contadores y estado global ────────────────────────────────
+let coinsCollected = 0;    // monedas recogidas (evita filter() por frame)
+let enemiesKilled  = 0;    // para pantalla de victoria
+let _waterFrame    = 0;    // throttle de animación de agua
+let coinIM         = null; // InstancedMesh de monedas (30 → 1 draw call)
+let dmgFlashEl     = null; // div de flash rojo al recibir daño
+
+// Vectores temporales reutilizables — elimina allocations por frame en move()
+const _tmpQ  = new THREE.Quaternion();
+const _tmpE  = new THREE.Euler();
+const _tmpV3 = new THREE.Vector3();
+const coinDummy = new THREE.Object3D(); // reutilizado para actualizar coinIM
 let treeLists = [[], [], []];             // [forestList, fieldList, mountainList]
 const treePartsList = [null, null, null]; // [{geo,mat}[]] per model — preserves multi-material
 
@@ -415,7 +428,10 @@ function buildScene() {
   const V = WORLD + 1; // vertices per side
   const positions = new Float32Array(V * V * 3);
   const colors    = new Float32Array(V * V * 3);
-  const indices   = [];
+  // Pre-aloca Uint32Array — evita ~24k push() calls (mejora #13)
+  const idxCount = WORLD * WORLD * 6;
+  const idxArr   = new Uint32Array(idxCount);
+  let   ii       = 0;
 
   for (let iz = 0; iz < V; iz++) {
     for (let ix = 0; ix < V; ix++) {
@@ -443,17 +459,18 @@ function buildScene() {
       colors[vi*3+2] = sumB / cnt;
     }
   }
-  // Two triangles per tile quad
+  // Two triangles per tile quad (Uint32Array pre-aloc — sin push)
   for (let iz = 0; iz < WORLD; iz++) {
     for (let ix = 0; ix < WORLD; ix++) {
       const tl = iz*V+ix, tr = tl+1, bl = tl+V, br = bl+1;
-      indices.push(tl, bl, tr,  tr, bl, br);
+      idxArr[ii++]=tl; idxArr[ii++]=bl; idxArr[ii++]=tr;
+      idxArr[ii++]=tr; idxArr[ii++]=bl; idxArr[ii++]=br;
     }
   }
   const terrainGeo = new THREE.BufferGeometry();
   terrainGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   terrainGeo.setAttribute('color',    new THREE.BufferAttribute(colors,    3));
-  terrainGeo.setIndex(indices);
+  terrainGeo.setIndex(new THREE.BufferAttribute(idxArr, 1));
   terrainGeo.computeVertexNormals();
   const terrainMesh = new THREE.Mesh(
     terrainGeo, new THREE.MeshLambertMaterial({ vertexColors: true })
@@ -663,21 +680,29 @@ function buildScene() {
     scene.add(rIM);
   }
 
-  // ── Monedas — cilindros dorados giratorios ───────────────────
+  // ── Monedas — InstancedMesh (30 meshes → 1 draw call, mejora #15) ──
   stars = [];
+  coinsCollected = 0;
   if (starList.length) {
-    const coinGeo = new THREE.CylinderGeometry(0.66, 0.66, 0.18, 16); // moneda gruesa
+    const coinGeo = new THREE.CylinderGeometry(0.66, 0.66, 0.18, 16);
     const coinMat = new THREE.MeshLambertMaterial({
       color: 0xffd700, emissive: 0xcc8800, emissiveIntensity: 0.6
     });
-    for (const [x, z] of starList) {
-      const mesh = new THREE.Mesh(coinGeo, coinMat);
-      const baseY = groundAt(x * TILE + TILE/2, z * TILE + TILE/2) + 1.0;
-      mesh.position.set(x * TILE + TILE/2, baseY, z * TILE + TILE/2);
-      mesh.castShadow = true;
-      scene.add(mesh);
-      stars.push({ mesh, collected: false, baseY, phase: hash(x, z, worldSeed+55) * Math.PI * 2 });
-    }
+    coinIM = new THREE.InstancedMesh(coinGeo, coinMat, starList.length);
+    coinIM.castShadow = true;
+    scene.add(coinIM);
+    starList.forEach(([x, z], i) => {
+      const wx = x * TILE + TILE/2, wz = z * TILE + TILE/2;
+      const baseY = groundAt(wx, wz) + 1.0;
+      coinDummy.position.set(wx, baseY, wz);
+      coinDummy.rotation.set(0, 0, 0);
+      coinDummy.scale.setScalar(1);
+      coinDummy.updateMatrix();
+      coinIM.setMatrixAt(i, coinDummy.matrix);
+      stars.push({ instIdx: i, collected: false, rising: false, riseT: 0,
+                   wx, wz, baseY, phase: hash(x, z, worldSeed+55) * Math.PI * 2 });
+    });
+    coinIM.instanceMatrix.needsUpdate = true;
   }
 
   // ── Dungeon torches ──────────────────────────────────────────
@@ -699,11 +724,12 @@ function buildScene() {
     const tIM = new THREE.InstancedMesh(torchGeo, torchMat, torches.length);
     const fIM = new THREE.InstancedMesh(flameGeo, flameMat, torches.length);
     torches.forEach(([x, z], i) => {
-      dummy.position.set(x*TILE + TILE/2, 1.5, z*TILE + TILE/2);
+      const ty = groundAt(x*TILE + TILE/2, z*TILE + TILE/2) + 1.5; // usa heightMap real
+      dummy.position.set(x*TILE + TILE/2, ty, z*TILE + TILE/2);
       dummy.rotation.set(0, 0, 0); dummy.scale.setScalar(1);
       dummy.updateMatrix();
       tIM.setMatrixAt(i, dummy.matrix);
-      dummy.position.y = 1.9;
+      dummy.position.y = ty + 0.4;
       dummy.updateMatrix();
       fIM.setMatrixAt(i, dummy.matrix);
     });
@@ -815,6 +841,7 @@ renderer.xr.addEventListener('sessionend', () => {
   renderer.toneMapping            = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure    = 1.1;
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  rainTimer = 60 + Math.random() * 60; // mejora #10: reanudar lluvia tras salir de VR
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -980,14 +1007,13 @@ function move(dt) {
   if (mx !== 0 || mz !== 0) {
     let hy = yaw;
     if (renderer.xr.isPresenting) {
-      const q = new THREE.Quaternion();
-      camera.getWorldQuaternion(q);
-      hy = new THREE.Euler().setFromQuaternion(q, 'YXZ').y;
+      // Reutilizar _tmpQ/_tmpE — sin new por frame (mejora #14)
+      camera.getWorldQuaternion(_tmpQ);
+      hy = _tmpE.setFromQuaternion(_tmpQ, 'YXZ').y;
     }
 
-    const dir = new THREE.Vector3(mx, 0, mz)
-      .normalize()
-      .applyEuler(new THREE.Euler(0, hy, 0));
+    // Reutilizar _tmpV3 — sin new Three.Vector3 por frame
+    _tmpV3.set(mx, 0, mz).normalize().applyEuler(_tmpE.set(0, hy, 0));
 
     const prevX = rig.position.x, prevZ = rig.position.z;
     const maxW  = (WORLD - 1) * TILE;
@@ -996,8 +1022,8 @@ function move(dt) {
     const inWater = tileAt(rig.position.x, rig.position.z) === T.WATER;
     const spd = inWater ? SPEED * 0.5 : SPEED;
 
-    rig.position.x = Math.max(1, Math.min(maxW, rig.position.x + dir.x * spd * dt));
-    rig.position.z = Math.max(1, Math.min(maxW, rig.position.z + dir.z * spd * dt));
+    rig.position.x = Math.max(1, Math.min(maxW, rig.position.x + _tmpV3.x * spd * dt));
+    rig.position.z = Math.max(1, Math.min(maxW, rig.position.z + _tmpV3.z * spd * dt));
 
     // Wall collision — push back if solid tile
     if (SOLID.has(tileAt(rig.position.x, rig.position.z))) {
@@ -1015,8 +1041,16 @@ function move(dt) {
       }
     }
 
-    // Footstep sound
-    if (stepTimer === 0) { stepTimer = 0.42; sfx.footstep(); }
+    // Footstep sound — tono varía según terreno (mejora #8)
+    if (stepTimer === 0) {
+      stepTimer = 0.42;
+      const ft = tileAt(rig.position.x, rig.position.z);
+      const stepFreq = ft === T.WATER  ? 130
+                     : ft === T.SAND   ? 190
+                     : ft === T.MOUND || ft === T.DFLOOR ? 380 + Math.random() * 80
+                     : 210 + Math.random() * 110;
+      sfx.footstep(stepFreq);
+    }
   }
 
   // Terrain following — smoothly match ground height
@@ -1074,20 +1108,45 @@ const sfx = {
     gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.45);
     osc.start(); osc.stop(ctx.currentTime + 0.45);
   },
-  footstep() {
+  footstep(freq = 250) {
     const ctx  = getAudioCtx();
-    const size = Math.floor(ctx.sampleRate * 0.04);
+    const size = Math.floor(ctx.sampleRate * 0.05);
     const buf  = ctx.createBuffer(1, size, ctx.sampleRate);
     const data = buf.getChannelData(0);
     for (let i = 0; i < size; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / size) * 0.4;
     const src    = ctx.createBufferSource();
     src.buffer   = buf;
     const filter = ctx.createBiquadFilter();
-    filter.type  = 'lowpass'; filter.frequency.value = 250;
+    filter.type  = 'lowpass'; filter.frequency.value = freq;
     const gain   = ctx.createGain();
     gain.gain.setValueAtTime(0.3, ctx.currentTime);
     src.connect(filter); filter.connect(gain); gain.connect(ctx.destination);
     src.start();
+  },
+  squeak() {
+    // Gruñido/chillido del sapo al aggrarse
+    const ctx = getAudioCtx(), t = ctx.currentTime;
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(550, t);
+    o.frequency.exponentialRampToValueAtTime(920, t + 0.07);
+    g.gain.setValueAtTime(0.22, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.10);
+    o.connect(g); g.connect(ctx.destination);
+    o.start(t); o.stop(t + 0.12);
+  },
+  birdScreech() {
+    // Chillido del ave fénix al despegar
+    const ctx = getAudioCtx(), t = ctx.currentTime;
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'sawtooth';
+    o.frequency.setValueAtTime(800, t);
+    o.frequency.exponentialRampToValueAtTime(1600, t + 0.06);
+    o.frequency.exponentialRampToValueAtTime(700, t + 0.22);
+    g.gain.setValueAtTime(0.18, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
+    o.connect(g); g.connect(ctx.destination);
+    o.start(t); o.stop(t + 0.30);
   },
   starCollect() {
     const ctx  = getAudioCtx();
@@ -1154,6 +1213,8 @@ function createEnemy(gx, gz) {
   return {
     mesh: g, hp: 3, hitCooldown: 0, dead: false, deathT: 0,
     spawnX: gx * TILE + TILE/2, spawnZ: gz * TILE + TILE/2, aggroed: false,
+    // Knockback + squash
+    vx: 0, vz: 0, squashT: 0, hitFlashT: 0,
     // Patrol
     patrolTarget: null,
     patrolPause:  hash(gx, gz, worldSeed + 44) * 1.5,
@@ -1206,17 +1267,42 @@ function updateEnemies(dt) {
     const dist = Math.sqrt(dx * dx + dz * dz);
 
     // Aggro transitions
-    if (!e.aggroed && dist < 8)  { e.aggroed = true; e.patrolTarget = null; }
+    if (!e.aggroed && dist < 8)  { e.aggroed = true; e.patrolTarget = null; sfx.squeak(); }
     if (e.aggroed  && dist > 12) {
       e.aggroed = false;
       e.lungePhase = 'cooldown'; e.lungeT = 0.4;
       e.mesh.rotation.x = 0; e.mesh.rotation.z = 0;
     }
 
+    // Knockback amortiguado (mejora #5)
+    if (e.vx !== 0 || e.vz !== 0) {
+      e.mesh.position.x += e.vx * dt;
+      e.mesh.position.z += e.vz * dt;
+      const damp = 1 - Math.min(1, 9 * dt);
+      e.vx *= damp; e.vz *= damp;
+      if (Math.abs(e.vx) < 0.01) e.vx = 0;
+      if (Math.abs(e.vz) < 0.01) e.vz = 0;
+    }
+
+    // Flash de daño: cambiar material por timer (mejora #9 — sin setTimeout)
+    if (e.hitFlashT > 0) {
+      e.hitFlashT -= dt;
+      e.mesh.children[0].material = ENEMY_MAT_DMGD;
+      if (e.hitFlashT <= 0) e.mesh.children[0].material = ENEMY_MAT_BODY;
+    }
+
     // Ground snap — smooth interpolation avoids popping on terrain edges
     const gY = groundAt(e.mesh.position.x, e.mesh.position.z);
     e.mesh.position.y += (gY - e.mesh.position.y) * Math.min(1, dt * 12);
     const body = e.mesh.children[0]; // body sphere
+
+    // Squash animado al recibir golpe (mejora #5)
+    if (e.squashT > 0) {
+      e.squashT = Math.max(0, e.squashT - dt);
+      body.scale.y = 0.65 + (1 - e.squashT / 0.12) * (0.65 - 0.38); // rebota de vuelta
+    } else {
+      body.scale.y = 0.65;
+    }
 
     // Three.js lookAt points -Z toward target, but enemies face +Z (eyes at z=0.33).
     // Use atan2 directly so +Z faces the target.
@@ -1272,8 +1358,11 @@ function updateEnemies(dt) {
           }
           if (!e.lungeDamaged && dist < 1.4) {
             e.lungeDamaged = true;
-            playerHP = Math.max(0, playerHP - 1);
-            updateHPBar();
+            if (!isShieldActive()) {        // mejora #20: escudo bloquea daño
+              playerHP = Math.max(0, playerHP - 1);
+              updateHPBar();
+              flashDamage();               // mejora #4: flash rojo en pantalla
+            }
           }
           if (e.lungeT <= 0) {
             e.lungePhase = 'retreat';
@@ -1340,15 +1429,20 @@ function updateEnemies(dt) {
       const tipDist = swordTipWorld.distanceTo(e.mesh.position);
       if (tipDist < 1.2 && swordVel > 1.5) {
         e.hp--; e.hitCooldown = 0.4; sfx.hit();
-        e.mesh.children[0].material = ENEMY_MAT_DMGD;
-        setTimeout(() => { if (!e.dead) e.mesh.children[0].material = ENEMY_MAT_BODY; }, 200);
-        if (e.hp <= 0) { e.dead = true; sfx.death(); }
+        e.hitFlashT = 0.20; // timer-based (no setTimeout)
+        e.squashT   = 0.12; // squash visual
+        // Knockback en dirección del golpe
+        const kd = tipDist || 1;
+        e.vx = (e.mesh.position.x - swordTipWorld.x) / kd * 5.5;
+        e.vz = (e.mesh.position.z - swordTipWorld.z) / kd * 5.5;
+        if (e.hp <= 0) { e.dead = true; sfx.death(); enemiesKilled++; }
       }
     }
     // Space key hit (desktop)
     if (keys['Space'] && dist < 2.5 && e.hitCooldown === 0) {
       e.hp--; e.hitCooldown = 0.5; sfx.hit();
-      if (e.hp <= 0) { e.dead = true; sfx.death(); }
+      e.hitFlashT = 0.20; e.squashT = 0.12;
+      if (e.hp <= 0) { e.dead = true; sfx.death(); enemiesKilled++; }
     }
   }
 }
@@ -1515,6 +1609,26 @@ function updatePushRocks(dt) {
 // ─────────────────────────────────────────────────────────────
 let gameEnded = false;
 
+// Flash rojo en pantalla al recibir daño (mejora #4)
+function flashDamage() {
+  if (!dmgFlashEl) return;
+  dmgFlashEl.style.opacity = '0.45';
+  setTimeout(() => { if (dmgFlashEl) dmgFlashEl.style.opacity = '0'; }, 60);
+}
+
+// Escudo activo: grip izquierdo en VR o Shift en desktop (mejora #20)
+function isShieldActive() {
+  if (renderer.xr.isPresenting && gripRefs.left) {
+    const session = renderer.xr.getSession();
+    if (session?.inputSources) {
+      for (const s of session.inputSources) {
+        if (s.handedness === 'left' && s.gamepad?.buttons[1]?.pressed) return true;
+      }
+    }
+  }
+  return keys['ShiftLeft'] || keys['ShiftRight'];
+}
+
 function showGameOver() {
   if (gameEnded) return;
   gameEnded = true;
@@ -1537,23 +1651,21 @@ function showVictory() {
   // HTML overlay (desktop)
   const el = document.createElement('div');
   el.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:200;color:#fff;font-family:monospace';
+  const mins = Math.floor(elapsed / 60), secs = Math.floor(elapsed % 60);
   el.innerHTML = `
     <div style="font-size:52px;color:#ffd700;margin-bottom:16px;text-shadow:0 0 20px #fa0">★ VICTORIA ★</div>
     <div style="font-size:20px;margin-bottom:8px;opacity:.8">¡Recolectaste 10 monedas!</div>
-    <div style="font-size:15px;margin-bottom:32px;color:#ffd700;opacity:.7">10 / ${stars.length} monedas</div>
+    <div style="font-size:15px;margin-bottom:4px;color:#ffd700;opacity:.7">Enemigos derrotados: ${enemiesKilled}</div>
+    <div style="font-size:15px;margin-bottom:32px;color:#aaf;opacity:.8">Tiempo: ${mins}m ${secs}s</div>
     <button onclick="location.reload()" style="font-size:18px;padding:12px 36px;background:#ffd700;color:#000;border:none;border-radius:8px;cursor:pointer">▶ Jugar de nuevo</button>
   `;
   document.body.appendChild(el);
-  // 3D overlay visible inside VR headset
-  show3DOverlay('VICTORIA', '¡Recolectaste 10 monedas!', '#ffd700');
+  show3DOverlay('VICTORIA', `Enemigos: ${enemiesKilled} | ${mins}m ${secs}s`, '#ffd700');
 }
 
 let starEl;
 function updateStarCounter() {
-  if (starEl) {
-    const collected = stars.filter(s => s.collected).length;
-    starEl.textContent = '\u2605 ' + collected + ' / ' + stars.length;
-  }
+  if (starEl) starEl.textContent = '\u2605 ' + coinsCollected + ' / ' + stars.length;
   drawHUD3d();
 }
 
@@ -1563,18 +1675,18 @@ function checkStarCollection() {
   let anyNew = false;
   for (const s of stars) {
     if (s.collected) continue;
-    const dx = s.mesh.position.x - px;
-    const dz = s.mesh.position.z - pz;
+    const dx = s.wx - px, dz = s.wz - pz;
     if (dx * dx + dz * dz < 1.5 * 1.5) {
       s.collected = true;
-      scene.remove(s.mesh);
+      s.rising = true; s.riseT = 0;  // mejora #18: animación de subida
+      coinsCollected++;               // mejora #12: contador directo
       sfx.starCollect();
       anyNew = true;
     }
   }
   if (anyNew) {
     updateStarCounter();
-    if (stars.filter(s => s.collected).length >= 10) showVictory();
+    if (coinsCollected >= 10) showVictory();
   }
 }
 
@@ -1794,7 +1906,7 @@ function drawHUD3d() {
     ctx.fillText('♥', 12 + i * 62, 64);
   }
   // Monedas
-  const col = stars.filter(s => s.collected).length;
+  const col = coinsCollected;
   ctx.fillStyle = '#ffd700';
   ctx.font = 'bold 40px sans-serif';
   ctx.fillText('● ' + col + ' / ' + stars.length, 326, 64);
@@ -1861,6 +1973,11 @@ function buildHUD() {
   hpBarEl = document.getElementById('hp');
   starEl  = document.getElementById('stars');
 
+  // Flash rojo al recibir daño (mejora #4)
+  dmgFlashEl = document.createElement('div');
+  dmgFlashEl.style.cssText = 'position:fixed;inset:0;background:#ff0000;opacity:0;pointer-events:none;z-index:100;transition:opacity 0.35s ease-out';
+  document.body.appendChild(dmgFlashEl);
+
   // 3D HUD — visible in VR headset, attached to camera
   const hc = document.createElement('canvas');
   hc.width = 512; hc.height = 128;
@@ -1916,17 +2033,34 @@ renderer.setAnimationLoop(() => {
     updateDayNight(dt);
     updateRain(dt);
   }
-  // En VR saltar animación de agua (costosa — actualiza todos los vértices)
-  if (!renderer.xr.isPresenting) updateWater(elapsed);
+  // Agua: cada 3 frames en desktop (mejora #16), omitir en VR
+  if (!renderer.xr.isPresenting && (++_waterFrame % 3 === 0)) updateWater(elapsed);
   // Minimapa: en VR actualizar cada 6 frames, en desktop cada frame
   if (!renderer.xr.isPresenting || Math.round(elapsed * 10) % 6 === 0) drawMinimap();
 
-  // Animate coins (bob + spin)
-  for (const s of stars) {
-    if (!s.collected) {
-      s.mesh.position.y = s.baseY + Math.sin(elapsed * 2.5 + s.phase) * 0.18;
-      s.mesh.rotation.x += dt * 1.8; // gira sobre eje X → cara visible al jugador
+  // Animate coins — InstancedMesh (mejoras #15 + #18 rise animation)
+  if (coinIM) {
+    for (const s of stars) {
+      if (s.rising) {
+        s.riseT += dt;
+        const prog = Math.min(s.riseT / 0.40, 1);
+        coinDummy.position.set(s.wx, s.baseY + 1.0 + prog * 1.5, s.wz);
+        coinDummy.scale.setScalar(1 - prog);
+        coinDummy.rotation.set(0, 0, 0);
+        if (prog >= 1) s.rising = false;
+      } else if (s.collected) {
+        coinDummy.scale.setScalar(0);
+        coinDummy.position.set(s.wx, s.baseY, s.wz);
+        coinDummy.rotation.set(0, 0, 0);
+      } else {
+        coinDummy.position.set(s.wx, s.baseY + Math.sin(elapsed * 2.5 + s.phase) * 0.18, s.wz);
+        coinDummy.rotation.set(elapsed * 1.8 + s.phase, 0, 0);
+        coinDummy.scale.setScalar(1);
+      }
+      coinDummy.updateMatrix();
+      coinIM.setMatrixAt(s.instIdx, coinDummy.matrix);
     }
+    coinIM.instanceMatrix.needsUpdate = true;
   }
 
   // Animate hearts + pickup
@@ -2019,7 +2153,10 @@ const _BMAT_BELLY = new THREE.MeshLambertMaterial({ color: 0xff8800 });
 const _BMAT_HEAD  = new THREE.MeshLambertMaterial({ color: 0xdd2200 });
 const _BMAT_WING  = new THREE.MeshLambertMaterial({ color: 0xff4400, side: THREE.DoubleSide });
 const _BMAT_BEAK  = new THREE.MeshLambertMaterial({ color: 0xffcc00 });
-const _BMAT_EYE   = new THREE.MeshLambertMaterial({ color: 0xffffaa, emissive: 0xff8800, emissiveIntensity: 1.5 });
+const _BMAT_EYE_W = new THREE.MeshLambertMaterial({ color: 0xffffff });          // sclera blanca
+const _BMAT_EYE_P = new THREE.MeshLambertMaterial({ color: 0x111111 });          // pupila negra
+const _BMAT_EYE_S = new THREE.MeshLambertMaterial({ color: 0xffffff,            // brillo pupila
+  emissive: 0xffffff, emissiveIntensity: 1.0 });
 const _BMAT_CREST = new THREE.MeshLambertMaterial({ color: 0xff2200 });
 const _BMAT_TAIL  = new THREE.MeshLambertMaterial({ color: 0xff5500, side: THREE.DoubleSide });
 const _FIRE_MAT   = new THREE.MeshLambertMaterial({ color: 0xff6600, emissive: 0xff2200, emissiveIntensity: 1.2 });
@@ -2028,64 +2165,72 @@ const _FIRE_GEO   = new THREE.SphereGeometry(0.22, 6, 4);
 function _createBirdMesh() {
   const g = new THREE.Group();
 
-  // ── Cuerpo — huevo alargado ───────────────────────────────
-  const body = new THREE.Mesh(new THREE.SphereGeometry(0.38, 9, 6), _BMAT_BODY);
-  body.scale.set(0.82, 0.70, 1.75);
+  // ── Cuerpo — huevo compacto (mejora #1) ──────────────────
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.36, 9, 6), _BMAT_BODY);
+  body.scale.set(0.80, 0.72, 1.55);
   g.add(body);
 
-  // Pecho — amarillo-naranja más claro
-  const breast = new THREE.Mesh(new THREE.SphereGeometry(0.30, 7, 5), _BMAT_BELLY);
-  breast.scale.set(0.70, 0.55, 1.4);
-  breast.position.set(0, -0.12, 0.1);
+  // Pecho — naranja más claro
+  const breast = new THREE.Mesh(new THREE.SphereGeometry(0.28, 7, 5), _BMAT_BELLY);
+  breast.scale.set(0.70, 0.52, 1.30);
+  breast.position.set(0, -0.10, 0.08);
   g.add(breast);
 
   // ── Cuello corto ─────────────────────────────────────────
-  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.18, 0.32, 6), _BMAT_BODY);
-  neck.rotation.x = -0.50;
-  neck.position.set(0, 0.17, 0.56);
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.16, 0.28, 6), _BMAT_BODY);
+  neck.rotation.x = -0.48;
+  neck.position.set(0, 0.16, 0.50);
   g.add(neck);
 
-  // ── Cabeza redonda ────────────────────────────────────────
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 8, 6), _BMAT_HEAD);
-  head.position.set(0, 0.29, 0.76);
+  // ── Cabeza grande y redonda (mejora #1) ──────────────────
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.28, 9, 7), _BMAT_HEAD);
+  head.position.set(0, 0.30, 0.68);
   g.add(head);
 
-  // Plumas de cresta (3 conos en la cima de la cabeza)
-  [[-0.07, 0, -0.06], [0, 0.05, 0], [0.07, 0, -0.06]].forEach(([ox, oy, rz]) => {
-    const c = new THREE.Mesh(new THREE.ConeGeometry(0.028, 0.17, 4), _BMAT_CREST);
-    c.position.set(ox, 0.52 + oy, 0.73);
-    c.rotation.set(-0.25, 0, rz);
+  // Cresta — 3 plumas en la coronilla
+  [[-0.06, 0.00, -0.05], [0, 0.06, 0.0], [0.06, 0.00, -0.05]].forEach(([ox, oy, rz]) => {
+    const c = new THREE.Mesh(new THREE.ConeGeometry(0.025, 0.18, 4), _BMAT_CREST);
+    c.position.set(ox, 0.56 + oy, 0.64);
+    c.rotation.set(-0.20, 0, rz);
     g.add(c);
   });
 
-  // ── Pico superior (apunta en +Z) ─────────────────────────
-  const beakU = new THREE.Mesh(new THREE.ConeGeometry(0.042, 0.20, 5), _BMAT_BEAK);
+  // ── Pico dorado (apunta en +Z) ───────────────────────────
+  const beakU = new THREE.Mesh(new THREE.ConeGeometry(0.040, 0.19, 5), _BMAT_BEAK);
   beakU.rotation.x = Math.PI / 2;
-  beakU.position.set(0, 0.31, 1.00);
+  beakU.position.set(0, 0.32, 0.93);
   g.add(beakU);
 
-  // Pico inferior (más pequeño, ligeramente hacia abajo)
-  const beakL = new THREE.Mesh(new THREE.ConeGeometry(0.028, 0.13, 4), _BMAT_BEAK);
+  const beakL = new THREE.Mesh(new THREE.ConeGeometry(0.026, 0.12, 4), _BMAT_BEAK);
   beakL.rotation.x = Math.PI / 2 + 0.28;
-  beakL.position.set(0, 0.22, 0.98);
+  beakL.position.set(0, 0.24, 0.91);
   g.add(beakL);
 
-  // Ojos brillantes
-  for (const sx of [-0.155, 0.155]) {
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.055, 6, 4), _BMAT_EYE);
-    eye.position.set(sx, 0.34, 0.84);
-    g.add(eye);
+  // ── Ojos expresivos: sclera + pupila (técnica del sapo, mejora #2) ──
+  for (const sx of [-0.175, 0.175]) {
+    // Sclera blanca
+    const sclera = new THREE.Mesh(new THREE.SphereGeometry(0.075, 7, 5), _BMAT_EYE_W);
+    sclera.position.set(sx, 0.34, 0.78);
+    g.add(sclera);
+    // Pupila negra — 0.09m adelante de la sclera
+    const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.046, 6, 4), _BMAT_EYE_P);
+    pupil.position.set(sx, 0.34, 0.87);
+    g.add(pupil);
+    // Punto de brillo pequeño
+    const shine = new THREE.Mesh(new THREE.SphereGeometry(0.016, 4, 3), _BMAT_EYE_S);
+    shine.position.set(sx + (sx > 0 ? -0.02 : 0.02), 0.36, 0.895);
+    g.add(shine);
   }
 
   // ── Alas de ave (BufferGeometry barrida horizontalmente) ──
   function makeBirdWingGeo() {
     const p = new Float32Array([
-       0.0,  0.0,  0.22,  // 0 raíz delantera
-       0.0,  0.0, -0.20,  // 1 raíz trasera
-       1.95, 0.26,-0.90,  // 2 codo / punta trasera
-       2.75, 0.10,  0.0,  // 3 punta primaria
-       1.85,-0.08,  0.48, // 4 punta inferior
-       0.35,-0.08,  0.32, // 5 raíz inferior
+       0.0,  0.0,  0.20,  // 0 raíz delantera
+       0.0,  0.0, -0.18,  // 1 raíz trasera
+       1.85, 0.24,-0.82,  // 2 codo / punta trasera
+       2.55, 0.08,  0.0,  // 3 punta primaria
+       1.75,-0.08,  0.44, // 4 punta inferior
+       0.32,-0.07,  0.28, // 5 raíz inferior
     ]);
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(p, 3));
@@ -2096,25 +2241,24 @@ function _createBirdMesh() {
   const wGeo = makeBirdWingGeo();
 
   const lWing = new THREE.Mesh(wGeo, _BMAT_WING);
-  lWing.position.set(0.32, 0.06, 0.0);
+  lWing.position.set(0.29, 0.05, 0.0);
   g.add(lWing);
 
   const rWing = new THREE.Mesh(wGeo, _BMAT_WING);
-  rWing.position.set(-0.32, 0.06, 0.0);
-  rWing.scale.x = -1; // espejo
+  rWing.position.set(-0.29, 0.05, 0.0);
+  rWing.scale.x = -1;
   g.add(rWing);
 
-  // ── Cola en abanico (3 plumas planas) ─────────────────────
-  [[-0.30, 0], [0, 0], [0.30, 0]].forEach(([rz, ry]) => {
-    const feather = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.85), _BMAT_TAIL);
-    feather.rotation.set(Math.PI / 2, ry, rz);
-    feather.position.set(0, -0.06, -0.98);
+  // ── Cola en abanico (3 plumas) ────────────────────────────
+  [[-0.28, 0], [0, 0], [0.28, 0]].forEach(([rz]) => {
+    const feather = new THREE.Mesh(new THREE.PlaneGeometry(0.20, 0.80), _BMAT_TAIL);
+    feather.rotation.set(Math.PI / 2, 0, rz);
+    feather.position.set(0, -0.05, -0.90);
     g.add(feather);
   });
 
-  g.scale.setScalar(1.5);
-  // Punta del pico en espacio local (pre-escala) — para origen del disparo
-  const beakTip = new THREE.Vector3(0, 0.31, 1.11);
+  g.scale.setScalar(0.80);  // más pequeño y compacto (mejora #1)
+  const beakTip = new THREE.Vector3(0, 0.32, 1.03); // punta del pico para fireball
   return { group: g, lWing, rWing, beakTip };
 }
 
@@ -2156,7 +2300,7 @@ function updateDragons(dt) {
         d.roost.topY + 0.6 + Math.sin(elapsed * 1.2) * 0.05,
         d.roost.z);
       d.mesh.rotation.y += dt * 0.25;
-      if (distRoost < 12) { d.state = 'takeoff'; d.stateT = 0; }
+      if (distRoost < 12) { d.state = 'takeoff'; d.stateT = 0; sfx.birdScreech(); } // mejora #17
 
     } else if (d.state === 'takeoff') {
       const tY = groundAt(px, pz) + EYE + 3.5;
@@ -2185,6 +2329,8 @@ function updateDragons(dt) {
         (px - d.mesh.position.x) ** 2 + (pz - d.mesh.position.z) ** 2
       ) || 1;
       d.mesh.rotation.x = -Math.atan2(dy, dh) * 0.5;
+      // Balanceo al virar — el ave se inclina en el viraje (mejora #3)
+      d.mesh.rotation.z = -Math.sin(d.orbitAngle) * 0.22;
 
       // Disparo
       d.shootCooldown -= dt;
@@ -2234,18 +2380,22 @@ function updateDragons(dt) {
     const f = fireBalls[i];
     f.life -= dt;
     if (f.life <= 0) { scene.remove(f.mesh); fireBalls.splice(i, 1); continue; }
+    f.vy -= 4.5 * dt;               // mejora #6: gravedad — arco parabólico
     f.mesh.position.x += f.vx * dt;
     f.mesh.position.y += f.vy * dt;
     f.mesh.position.z += f.vz * dt;
-    f.mesh.scale.setScalar(0.5 + (f.life / 3.5) * 0.8); // encoge al morir
+    f.mesh.scale.setScalar(0.5 + (f.life / 3.5) * 0.8);
     // Impacto con el jugador
     const hx = f.mesh.position.x - px;
     const hy = f.mesh.position.y - playerWorldY;
     const hz = f.mesh.position.z - pz;
     if (hx*hx + hy*hy + hz*hz < 0.9 * 0.9 && !gameEnded) {
       scene.remove(f.mesh); fireBalls.splice(i, 1);
-      playerHP = Math.max(0, playerHP - 1);
-      updateHPBar();
+      if (!isShieldActive()) {          // mejora #20: escudo bloquea bola de fuego
+        playerHP = Math.max(0, playerHP - 1);
+        updateHPBar();
+        flashDamage();                  // mejora #4: flash rojo
+      }
     }
   }
 }
