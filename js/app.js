@@ -1795,11 +1795,11 @@ function updateEnemies(dt) {
     if (e.hitFlashT > 0) {
       e.hitFlashT -= dt;
       e.mesh.children[0].material = ENEMY_MAT_DMGD;
-      if (e.hitFlashT <= 0) e.mesh.children[0].material = ENEMY_MAT_BODY;
+      if (e.hitFlashT <= 0) e.mesh.children[0].material = e._bossMat || ENEMY_MAT_BODY;
     }
 
-    // Ground snap — smooth interpolation avoids popping on terrain edges
-    const gY = groundAt(e.mesh.position.x, e.mesh.position.z);
+    // Ground snap — usa fixedY para el boss (sobre el techo), groundAt para el resto
+    const gY = (e.fixedY !== undefined) ? e.fixedY : groundAt(e.mesh.position.x, e.mesh.position.z);
     e.mesh.position.y += (gY - e.mesh.position.y) * Math.min(1, dt * 12);
     const body = e.mesh.children[0]; // body sphere
 
@@ -3462,12 +3462,12 @@ function spawnCastleRoof() {
 function spawnBossSlime() {
   const WLAYERS = 7, WSCALE = TILE / (3 * 0.68), LAYER_H = 1.02 * WSCALE;
   const roofY = (WLAYERS - 1) * LAYER_H;
-  const SC = 50.0; // escala respecto al slime normal
+  const SC = 20.0; // escala respecto al slime normal
 
   const bx = 31 * TILE + TILE / 2;
   const bz = 17 * TILE + TILE / 2;
 
-  const bossMat  = new THREE.MeshLambertMaterial({ color: 0x1b5e20, flatShading: true }); // verde oscuro
+  const bossMat = new THREE.MeshLambertMaterial({ color: 0x1b5e20, flatShading: true });
   const g = new THREE.Group();
 
   const body = new THREE.Mesh(new THREE.SphereGeometry(0.42 * SC, 12, 8), bossMat);
@@ -3484,18 +3484,28 @@ function spawnBossSlime() {
     g.add(eye, pupil);
   }
 
-  // Indicador de misión eliminado — es un boss, no un NPC
   g.position.set(bx, roofY, bz);
   scene.add(g);
 
+  // Colisionador estático para que el jugador no lo traspase
+  if (rapierWorld) {
+    const bodyR = 0.42 * SC;       // radio esfera
+    const bodyH = bodyR * 0.65;    // mitad de altura aplastada
+    rapierWorld.createCollider(
+      RAPIER.ColliderDesc.capsule(bodyH * 0.3, bodyR * 0.85)
+        .setTranslation(bx, roofY + 0.3 * SC + bodyH * 0.3, bz)
+    );
+  }
+
   enemies.push({
-    mesh: g, hp: 20, hitCooldown: 0, dead: false, deathT: 0,
+    mesh: g, hp: 30, hitCooldown: 0, dead: false, deathT: 0,
     spawnX: bx, spawnZ: bz, aggroed: false,
     vx: 0, vz: 0, squashT: 0, hitFlashT: 0,
     patrolTarget: null, patrolPause: 2.5, patrolStep: 0,
     lungePhase: 'cooldown', lungeT: 2.0,
     lungeDir: new THREE.Vector3(), lungeDamaged: false,
     phase: 0,
+    fixedY: roofY,          // no usar groundAt — siempre sobre el techo
     _bossMat: bossMat, _bossBody: body, _bossScale: SC,
   });
 }
