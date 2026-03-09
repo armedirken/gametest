@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { VRButton }        from 'three/addons/webxr/VRButton.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import RAPIER from '@dimforge/rapier3d-compat';
 
 // ─────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -73,8 +74,8 @@ const _occupied = new Set(); // tiles ocupados: árboles + casas NPC → evitar 
 let stars = [];
 
 const pushRocks       = [];
-const towerObstacles  = []; // { x, z, r } — colisión cilíndrica de torres decorativas
-const castleTowerWalls = []; // { cx, cz, innerR, outerR, midR, gaps[] } — muros de las torres del castillo
+const towerObstacles  = []; // reservado (colisiones manejadas por Rapier)
+const castleTowerWalls = []; // reservado (colisiones manejadas por Rapier)
 const dragonRoosts    = []; // { x, z, topY } — cima de cada torre con dragón
 const dragons         = []; // objetos dragón activos
 const fireBalls       = []; // { mesh, vx, vy, vz, life } — bolas de fuego
@@ -125,9 +126,15 @@ let onGround    = true;
 let jumpPressed = false;
 const JUMP_VY   = 22;   // impulso inicial al saltar (m/s)
 const GRAVITY   = 50;   // aceleración gravitatoria (m/s²)
-const stairSteps = [];  // { wx, wz, topY, r } — plataformas discretas de escalera
-let coyoteTimer = 0;    // tiempo de gracia al salir del borde de un escalón (s)
-let lastStepY   = null; // último suelo de escalón detectado
+
+// ── Rapier physics ────────────────────────────────────────────
+let rapierWorld    = null;
+let playerBody     = null;
+let playerCollider = null;
+let charCtrl       = null;
+const CAPSULE_HALF = 0.6;   // halfHeight de la cápsula
+const CAPSULE_RAD  = 0.45;  // radio de la cápsula
+const CAPS_OFFSET  = CAPSULE_HALF + CAPSULE_RAD; // offset capsule center vs feet = 1.05m
 
 // ── Indicador de bioma ────────────────────────────────────────
 let biomeEl        = null;
@@ -1280,18 +1287,62 @@ function groundAt(wx, wz) {
        + vertexH(tx+1, tz+1) *    fx  *    fz;
 }
 
-// Detecta si el jugador está sobre una plataforma de escalera.
-// Solo activa el peldaño si el jugador ya alcanzó su nivel (≤0.3m por debajo),
-// evitando tanto teletransporte al entrar como caídas al aterrizar.
-function stepFloorAt(px, pz, py) {
-  let best = null;
-  for (const st of stairSteps) {
-    const dx = px - st.wx, dz = pz - st.wz;
-    if (dx * dx + dz * dz > st.r * st.r) continue;
-    if (py < st.topY - 0.3) continue; // ignorar peldaños aún por encima del jugador
-    if (best === null || st.topY > best) best = st.topY;
+
+// ─────────────────────────────────────────────────────────────
+// RAPIER PHYSICS
+// ─────────────────────────────────────────────────────────────
+async function initPhysics() {
+  await RAPIER.init();
+  rapierWorld = new RAPIER.World({ x: 0, y: -GRAVITY, z: 0 });
+
+  // Character controller
+  charCtrl = rapierWorld.createCharacterController(0.05);
+  charCtrl.setSlideEnabled(true);
+  charCtrl.setMaxSlopeClimbAngle(55 * Math.PI / 180);
+  charCtrl.setMinSlopeSlideAngle(45 * Math.PI / 180);
+  charCtrl.enableSnapToGround(0.5);
+  charCtrl.enableAutostep(0.5, 0.2, true); // auto-sube hasta 0.5m (terreno); escalones 1.2m requieren salto
+
+  // Player capsule (kinematic)
+  const bodyDesc = RAPIER.RigidBodyDesc.kinematicPositionBased();
+  playerBody = rapierWorld.createRigidBody(bodyDesc);
+  const capsDesc = RAPIER.ColliderDesc.capsule(CAPSULE_HALF, CAPSULE_RAD);
+  playerCollider = rapierWorld.createCollider(capsDesc, playerBody);
+}
+
+function addTerrainCollider() {
+  const W = WORLD;
+  const heights = new Float32Array(W * W);
+  for (let r = 0; r < W; r++)
+    for (let c = 0; c < W; c++)
+      heights[r * W + c] = heightMap[r][c] ?? 0;
+  const scale = { x: (W - 1) * TILE, y: 1.0, z: (W - 1) * TILE };
+  const desc  = RAPIER.ColliderDesc.heightfield(W - 1, W - 1, heights, scale)
+    .setTranslation((W - 1) * TILE / 2, 0, (W - 1) * TILE / 2);
+  rapierWorld.createCollider(desc);
+}
+
+function addWallColliders() {
+  const wallH  = 7 * (1.02 * TILE / (3 * 0.68)); // WLAYERS * LAYER_H ≈ 42m
+  const hHalf  = wallH / 2;
+  const tHalf  = TILE / 2;
+  for (let z = 0; z < WORLD; z++) {
+    for (let x = 0; x < WORLD; x++) {
+      if (worldMap[z][x] !== T.DWALL) continue;
+      const wx = x * TILE + TILE / 2, wz = z * TILE + TILE / 2;
+      const bh = heightMap[z][x] ?? 0;
+      rapierWorld.createCollider(
+        RAPIER.ColliderDesc.cuboid(tHalf, hHalf, tHalf)
+          .setTranslation(wx, bh + hHalf, wz)
+      );
+    }
   }
-  return best;
+}
+
+// Helper: quaternion desde rotación Y (para colliders rotados)
+function _yRotQuat(angle) {
+  const h = angle / 2;
+  return { x: 0, y: Math.sin(h), z: 0, w: Math.cos(h) };
 }
 
 function move(dt) {
@@ -1345,7 +1396,6 @@ function move(dt) {
     // Reutilizar _tmpV3 — sin new Three.Vector3 por frame
     _tmpV3.set(mx, 0, mz).normalize().applyEuler(_tmpE.set(0, hy, 0));
 
-    const prevX = rig.position.x, prevZ = rig.position.z;
     const maxW  = (WORLD - 1) * TILE;
 
     // Swim at half speed in shallow water; sprint multiplier; boost on PATH
@@ -1354,63 +1404,26 @@ function move(dt) {
     const onPath   = curMoveTile === T.PATH;
     const spd = (inWater ? SPEED * 0.5 : SPEED) * (isSprinting ? 1.6 : 1.0) * (onPath ? 1.25 : 1.0);
 
-    rig.position.x = Math.max(1, Math.min(maxW, rig.position.x + _tmpV3.x * spd * dt));
-    rig.position.z = Math.max(1, Math.min(maxW, rig.position.z + _tmpV3.z * spd * dt));
+    const dx = _tmpV3.x * spd * dt;
+    const dz = _tmpV3.z * spd * dt;
 
-    // Wall collision — push back if solid tile
-    if (SOLID.has(tileAt(rig.position.x, rig.position.z))) {
-      rig.position.x = prevX;
-      rig.position.z = prevZ;
-    }
-
-    // Tower collision — empuja al jugador fuera del cilindro de cada torre
-    for (const t of towerObstacles) {
-      const tdx = rig.position.x - t.x, tdz = rig.position.z - t.z;
-      const td  = Math.sqrt(tdx * tdx + tdz * tdz);
-      if (td < t.r && td > 0.01) {
-        rig.position.x = t.x + (tdx / td) * t.r;
-        rig.position.z = t.z + (tdz / td) * t.r;
-      }
-    }
-
-    // Colisión muro circular de la aldea — cáscara cilíndrica con huecos de entrada
-    {
-      const _vwx = VILLAGE_CX * TILE + TILE * 0.5;
-      const _vwz = VILLAGE_CZ * TILE + TILE * 0.5;
-      const _wRm = VILLAGE_WALL_R * TILE * 0.8; // mismo factor que spawnVillage
-      const _vdx = rig.position.x - _vwx, _vdz = rig.position.z - _vwz;
-      const _vd  = Math.sqrt(_vdx * _vdx + _vdz * _vdz);
-      if (_vd > _wRm - 3.0 && _vd < _wRm + 3.0) {
-        const _va = Math.atan2(_vdz, _vdx);
-        const _atEnt = VILLAGE_ENT_ANGLES.some(ea => {
-          let d = Math.abs(_va - ea);
-          if (d > Math.PI) d = Math.PI * 2 - d;
-          return d < VILLAGE_ENT_HALF + 0.30;
-        });
-        if (!_atEnt) { rig.position.x = prevX; rig.position.z = prevZ; }
-      }
-    }
-
-    // Colisión muros de las torres del castillo — anillo sólido con hueco de puerta/ventana
-    for (const tw of castleTowerWalls) {
-      const tdx = rig.position.x - tw.cx, tdz = rig.position.z - tw.cz;
-      const dist = Math.sqrt(tdx * tdx + tdz * tdz);
-      if (dist < tw.innerR || dist > tw.outerR) continue;
-      const ang = Math.atan2(tdz, tdx);
-      const atGap = tw.gaps.some(g => {
-        let d = Math.abs(ang - g.angle);
-        if (d > Math.PI) d = Math.PI * 2 - d;
-        return d < g.half;
-      });
-      if (atGap) continue;
-      // Empujar hacia el lado más cercano del muro
-      if (dist < tw.midR) {
-        rig.position.x = tw.cx + (tdx / dist) * (tw.innerR - 0.1);
-        rig.position.z = tw.cz + (tdz / dist) * (tw.innerR - 0.1);
-      } else {
-        rig.position.x = tw.cx + (tdx / dist) * (tw.outerR + 0.1);
-        rig.position.z = tw.cz + (tdz / dist) * (tw.outerR + 0.1);
-      }
+    // Pasar movimiento horizontal a Rapier
+    if (rapierWorld && playerBody) {
+      charCtrl.computeColliderMovement(
+        playerCollider,
+        { x: dx, y: 0, z: dz },
+        true, null, (col) => col !== playerCollider
+      );
+      const cm = charCtrl.computedMovement();
+      const pos = playerBody.translation();
+      const nx = Math.max(1, Math.min(maxW, pos.x + cm.x));
+      const nz = Math.max(1, Math.min(maxW, pos.z + cm.z));
+      playerBody.setNextKinematicTranslation({ x: nx, y: pos.y, z: nz });
+      rig.position.x = nx;
+      rig.position.z = nz;
+    } else {
+      rig.position.x = Math.max(1, Math.min(maxW, rig.position.x + dx));
+      rig.position.z = Math.max(1, Math.min(maxW, rig.position.z + dz));
     }
 
     // Footstep sound — tono varía según terreno (mejora #8)
@@ -1425,42 +1438,36 @@ function move(dt) {
     }
   }
 
-  // ── Física de salto y gravedad ────────────────────────────────
-  const targetY = groundAt(rig.position.x, rig.position.z);
-  const stairH  = stepFloorAt(rig.position.x, rig.position.z, rig.position.y);
-
-  // Coyote time: al salir del borde de un escalón, mantener el suelo 0.15s
-  if (stairH !== null) { lastStepY = stairH; coyoteTimer = 0.15; }
-  else coyoteTimer = Math.max(0, coyoteTimer - dt);
-  const effectiveStepH = stairH !== null ? stairH
-                       : (coyoteTimer > 0 && !jumpPressed && jumpVY <= 0) ? lastStepY
-                       : null;
-  const floorY = effectiveStepH !== null ? Math.max(targetY, effectiveStepH) : targetY;
-
-  if (onGround) {
-    rig.position.y += (floorY - rig.position.y) * Math.min(1, dt * 10);
-    // Salto — Space en desktop, botón A (buttons[4]) en VR
+  // ── Física de salto y gravedad (Rapier) ──────────────────────
+  if (rapierWorld && playerBody) {
     const wantsJump = keys['Space'] || (renderer.xr.isPresenting && _vrAWas);
-    if (wantsJump && !jumpPressed) {
-      jumpVY = JUMP_VY;
-      onGround = false;
-      jumpPressed = true;
-      sfx.jump();
+    if (onGround && wantsJump && !jumpPressed) {
+      jumpVY = JUMP_VY; onGround = false; jumpPressed = true; sfx.jump();
     }
-  } else {
-    jumpVY -= GRAVITY * dt;
-    rig.position.y += jumpVY * dt;
-    if (rig.position.y <= floorY) {
-      const heavyLand = jumpVY < -28;
-      rig.position.y = floorY;
-      jumpVY = 0;
-      onGround = true;
-      sfx.land();
-      _shakeT = 0.12;
-      if (heavyLand) { playerHP = Math.max(0, playerHP - 1); updateHPBar(); flashDamage(); }
+    if (!onGround) jumpVY -= GRAVITY * dt;
+
+    charCtrl.computeColliderMovement(
+      playerCollider,
+      { x: 0, y: jumpVY * dt, z: 0 },  // horizontal ya aplicado arriba; aquí solo vertical
+      true, null, (col) => col !== playerCollider
+    );
+    const cm = charCtrl.computedMovement();
+    const pos = playerBody.translation();
+    playerBody.setNextKinematicTranslation({ x: pos.x, y: pos.y + cm.y, z: pos.z });
+
+    const wasInAir = !onGround;
+    onGround = charCtrl.computedGrounded();
+    if (onGround && wasInAir) {
+      if (jumpVY < -28) { playerHP = Math.max(0, playerHP - 1); updateHPBar(); flashDamage(); }
+      sfx.land(); _shakeT = 0.12;
     }
+    if (onGround) jumpVY = 0;
+    if (!keys['Space']) jumpPressed = false;
+
+    // Sincronizar rig con el cuerpo físico
+    const p = playerBody.translation();
+    rig.position.y = p.y - CAPS_OFFSET;
   }
-  if (!keys['Space']) jumpPressed = false;
 
   // ── Indicador de bioma ────────────────────────────────────────
   if (biomeEl) {
@@ -2862,6 +2869,11 @@ renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
   elapsed += dt;
 
+  if (rapierWorld) {
+    rapierWorld.timestep = Math.min(dt, 1 / 30);
+    rapierWorld.step();
+  }
+
   if (!gameEnded) {
     move(dt);
     updateEnemies(dt);
@@ -3010,8 +3022,14 @@ function spawnRockTowers() {
     const wx     = x * TILE + TILE / 2, wz = z * TILE + TILE / 2;
     const baseY  = groundAt(wx, wz);
     const radius = 1.0 + hash(x, z, worldSeed + 502) * 0.8; // 1.0–1.8 m
-    // Registrar colisión y cima para el dragón
-    towerObstacles.push({ x: wx, z: wz, r: radius + TOW_SC * 0.34 + 0.4 });
+    // Collider físico de la torre (cápsula cilíndrica) y cima para el dragón
+    const towColR = radius + TOW_SC * 0.34 + 0.4;
+    if (rapierWorld) {
+      rapierWorld.createCollider(
+        RAPIER.ColliderDesc.capsule(ROCK_H * layers / 2, towColR)
+          .setTranslation(wx, baseY + ROCK_H * layers / 2, wz)
+      );
+    }
     dragonRoosts.push({ x: wx, z: wz, topY: baseY + ROCK_H * layers });
     for (let ly = 0; ly < layers; ly++) {
       const off = (ly & 1) ? Math.PI / perLayer : 0; // capas alternas rotadas
@@ -3430,7 +3448,6 @@ function spawnSpiralStairs() {
   const PLAT_R      = innerR - PLAT_D * 0.5; // borde exterior ras con el muro interior
   const PLAT_W      = 7.6;             // ancho de la plataforma (m) — doble
   const PLAT_T      = 0.9;             // grosor/alto del bloque (m)
-  const STEP_R      = 5.0;             // cubre la diagonal completa del peldaño (7.6×3.0m) + margen
 
   const SX = PLAT_W / 0.68;
   const SY = PLAT_T / 1.02;
@@ -3471,8 +3488,14 @@ function spawnSpiralStairs() {
       sd.updateMatrix();
       stairIM.setMatrixAt(si++, sd.matrix);
 
-      // Colisión: el jugador aterriza aquí si está dentro del radio y cerca de la altura
-      stairSteps.push({ wx: platX, wz: platZ, topY: platY, r: STEP_R });
+      // Collider físico del peldaño
+      if (rapierWorld) {
+        rapierWorld.createCollider(
+          RAPIER.ColliderDesc.cuboid(PLAT_W / 2, PLAT_T / 2, PLAT_D / 2)
+            .setTranslation(platX, platY - PLAT_T / 2, platZ)
+            .setRotation(_yRotQuat(-(Math.PI / 2 + angle)))
+        );
+      }
     }
   });
 
@@ -3487,7 +3510,6 @@ function spawnCastleTowers() {
   const WALL_D  = TILE * 0.55;
   const BLOCK_H = TILE * 0.52;
   const segAngle = (2 * Math.PI) / ROCKS_RING;
-  const innerR  = towerR - WALL_D / 2;
   const outerR  = towerR + WALL_D / 2;
   const roofMat = new THREE.MeshLambertMaterial({ color: 0x2a4020, flatShading: true });
   const merMat  = new THREE.MeshLambertMaterial({ color: 0x5a3828, flatShading: true });
@@ -3513,8 +3535,6 @@ function spawnCastleTowers() {
   const WIN_LAYERS_START = 10;
   const WIN_LAYERS_END   = 12;
   const WIN_SEGS    = 4;
-  // Ángulo de semiapertura para colisión (rad)
-  const DOOR_HALF_ANG = segAngle * (DOOR_SEGS / 2 + 0.3);
 
   const bodyInst = positions.length * TOW_LAYERS * ROCKS_RING;
   const merlInst = positions.length * ROCKS_RING;
@@ -3572,6 +3592,19 @@ function spawnCastleTowers() {
         td.scale.set(SX, SY, SZ);
         td.updateMatrix();
         bIM.setMatrixAt(bIdx++, td.matrix);
+
+        // Collider físico para este bloque
+        if (rapierWorld) {
+          rapierWorld.createCollider(
+            RAPIER.ColliderDesc.cuboid(arcW / 2, BLOCK_H / 2, WALL_D / 2)
+              .setTranslation(
+                wx + Math.cos(a) * towerR,
+                bh + BLOCK_H * (ly + 0.5),
+                wz + Math.sin(a) * towerR
+              )
+              .setRotation(_yRotQuat(-(Math.PI / 2 + a)))
+          );
+        }
       }
     }
 
@@ -3595,14 +3628,8 @@ function spawnCastleTowers() {
       mIM.setMatrixAt(mIdx++, td.matrix);
     }
 
-    // Registrar colisión: un solo gap en doorAngle sirve para puerta y ventana superior
-    castleTowerWalls.push({
-      cx: wx, cz: wz,
-      innerR, outerR, midR: towerR,
-      gaps: [
-        { angle: doorAngle, half: DOOR_HALF_ANG },
-      ],
-    });
+    // Colliders físicos del muro (ya fueron creados bloque a bloque en el loop de arriba)
+    // (los bloques con scale=0 no tienen collider — ver loop principal)
 
     // Techo cónico
     const cone = new THREE.Mesh(
@@ -3662,6 +3689,15 @@ function spawnVillage() {
       wd.scale.set(SX, SY, SZ);
       wd.updateMatrix();
       wIM.setMatrixAt(wIdx++, wd.matrix);
+
+      // Solo primera capa para colisión (capas superiores no son accesibles)
+      if (rapierWorld && ly === 0) {
+        rapierWorld.createCollider(
+          RAPIER.ColliderDesc.cuboid(WALL_W / 2, LAYER_H * WALL_LAYERS / 2, WALL_D / 2)
+            .setTranslation(wx, baseH + LAYER_H * WALL_LAYERS / 2, wz)
+            .setRotation(_yRotQuat(-(Math.PI / 2 + angle)))
+        );
+      }
     }
   });
   wIM.instanceMatrix.needsUpdate = true;
@@ -3853,10 +3889,15 @@ function updateNPCs(dt) {
 // ─────────────────────────────────────────────────────────────
 // INIT
 // ─────────────────────────────────────────────────────────────
-function initGame() {
+async function initGame() {
+  await initPhysics();
   generateMap();
+  addTerrainCollider();
+  addWallColliders();
   buildScene();
   spawnPlayer();
+  // Sincronizar posición inicial del jugador con Rapier
+  playerBody.setTranslation({ x: rig.position.x, y: rig.position.y + CAPS_OFFSET, z: rig.position.z }, true);
   spawnEnemies();
   spawnPushRocks();
   spawnRockTowers();
@@ -3976,4 +4017,4 @@ function _buildTreeParts(seed) {
   return [{ geo: trunkGeo, mat: trunkMat }, { geo: canopyGeo, mat: leafMat }];
 }
 
-initGame();
+initGame().catch(console.error);
