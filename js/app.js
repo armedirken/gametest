@@ -3443,6 +3443,61 @@ function spawnCastleRoof() {
   });
   roofIM.instanceMatrix.needsUpdate = true;
   scene.add(roofIM);
+
+  // Física: un cuboid por tile del techo para que el jugador pueda caminar encima
+  if (rapierWorld) {
+    dfloors.forEach(([x, z]) => {
+      const cx = x * TILE + TILE / 2, cz = z * TILE + TILE / 2;
+      rapierWorld.createCollider(
+        RAPIER.ColliderDesc.cuboid(TILE / 2, 0.6, TILE / 2)
+          .setTranslation(cx, roofY, cz)
+      );
+    });
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// SLIME GIGANTE BOSS — techo del castillo
+// ─────────────────────────────────────────────────────────────
+function spawnBossSlime() {
+  const WLAYERS = 7, WSCALE = TILE / (3 * 0.68), LAYER_H = 1.02 * WSCALE;
+  const roofY = (WLAYERS - 1) * LAYER_H;
+  const SC = 4.0; // escala respecto al slime normal
+
+  const bx = 31 * TILE + TILE / 2;
+  const bz = 17 * TILE + TILE / 2;
+
+  const bossMat  = new THREE.MeshLambertMaterial({ color: 0x1b5e20, flatShading: true }); // verde oscuro
+  const g = new THREE.Group();
+
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.42 * SC, 12, 8), bossMat);
+  body.scale.y = 0.65;
+  body.position.y = 0.3 * SC;
+  body.castShadow = true;
+  g.add(body);
+
+  for (const sx of [-0.16 * SC, 0.16 * SC]) {
+    const eye   = new THREE.Mesh(new THREE.SphereGeometry(0.10 * SC, 7, 5), ENEMY_MAT_EYE);
+    const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.055 * SC, 5, 4), ENEMY_MAT_PUPIL);
+    eye.position.set(sx,   0.46 * SC, 0.33 * SC);
+    pupil.position.set(sx, 0.46 * SC, 0.43 * SC);
+    g.add(eye, pupil);
+  }
+
+  // Indicador de misión eliminado — es un boss, no un NPC
+  g.position.set(bx, roofY, bz);
+  scene.add(g);
+
+  enemies.push({
+    mesh: g, hp: 20, hitCooldown: 0, dead: false, deathT: 0,
+    spawnX: bx, spawnZ: bz, aggroed: false,
+    vx: 0, vz: 0, squashT: 0, hitFlashT: 0,
+    patrolTarget: null, patrolPause: 2.5, patrolStep: 0,
+    lungePhase: 'cooldown', lungeT: 2.0,
+    lungeDir: new THREE.Vector3(), lungeDamaged: false,
+    phase: 0,
+    _bossMat: bossMat, _bossBody: body, _bossScale: SC,
+  });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -3521,59 +3576,45 @@ function spawnSpiralStairs() {
 // PUENTE — Torre SW → cima muro castillo
 // ─────────────────────────────────────────────────────────────
 function spawnBridge() {
-  // Mismas constantes que buildTiles y spawnCastleTowers
-  const WLAYERS = 7;
-  const WSCALE  = TILE / (3 * 0.68);
-  const LAYER_H = 1.02 * WSCALE;        // ≈ 6.0 m por capa de muro
+  const WLAYERS = 7, WSCALE = TILE / (3 * 0.68), LAYER_H = 1.02 * WSCALE;
+  const towerR = TILE * 1.3, WALL_D = TILE * 0.55, BLOCK_H = TILE * 0.52;
+  const innerR = towerR - WALL_D / 2;
+  const CASTLE_CX = 31 * TILE + TILE * 0.5, CASTLE_CZ = 17 * TILE + TILE * 0.5;
 
-  const towerR          = TILE * 1.3;
-  const WALL_D          = TILE * 0.55;
-  const BLOCK_H         = TILE * 0.52;
-  const innerR          = towerR - WALL_D / 2;
-  const WIN_LAYERS_START = 10;
-
-  const CASTLE_CX = 31 * TILE + TILE * 0.5;
-  const CASTLE_CZ = 17 * TILE + TILE * 0.5;
-
-  // Torre SW (tx=17, tz=24)
-  const wx = 17 * TILE + TILE * 0.5;
-  const wz = 24 * TILE + TILE * 0.5;
+  const wx = 17 * TILE + TILE * 0.5, wz = 24 * TILE + TILE * 0.5;
   const bh = groundAt(wx, wz);
-
   const doorAngle = Math.atan2(CASTLE_CZ - wz, CASTLE_CX - wx);
-  const cdx = Math.cos(doorAngle);
-  const cdz = Math.sin(doorAngle);
+  const cdx = Math.cos(doorAngle), cdz = Math.sin(doorAngle);
+  const px = -cdz, pz = cdx; // perpendicular al puente
 
-  // Inicio: cara interior de la ventana al nivel del suelo de la apertura
-  const startX = wx + cdx * innerR;
-  const startZ = wz + cdz * innerR;
-  const startY = bh + BLOCK_H * WIN_LAYERS_START;
-
-  // Fin: cima del muro oeste del castillo (tx=22) siguiendo doorAngle
+  const startX = wx + cdx * innerR, startZ = wz + cdz * innerR;
+  const startY = bh + BLOCK_H * 10;
   const endXTarget = 22 * TILE + TILE * 0.5;
-  const tBridge    = (endXTarget - startX) / cdx;
-  const endX       = endXTarget;
-  const endZ       = startZ + tBridge * cdz;
-  const endY       = groundAt(endX, endZ) + WLAYERS * LAYER_H;
-
+  const tLen = (endXTarget - startX) / cdx;
+  const endX = endXTarget, endZ = startZ + tLen * cdz;
+  const endY = groundAt(endX, endZ) + WLAYERS * LAYER_H;
   const bridgeLen = Math.hypot(endX - startX, endZ - startZ);
-  const slopeAngle = Math.atan2(endY - startY, bridgeLen); // negativo = bajada
 
-  // Bloques del suelo — inclinados con la pendiente del puente
-  const BRIDGE_W = 5.0;
-  const BRIDGE_D = 3.2;
-  const BRIDGE_H = 1.8;
-  const N = Math.max(4, Math.ceil(bridgeLen / BRIDGE_D));
+  // Curva del arco: y(t) = lerp + ARCH_H * sin(π*t)  — sube, luego baja
+  const ARCH_H = 10.0;
+  const archY = t => startY + (endY - startY) * t + ARCH_H * Math.sin(Math.PI * t);
+  // Ángulo tangente en cada punto del arco para inclinar los bloques
+  const archSlope = t => Math.atan2(
+    (endY - startY) + ARCH_H * Math.PI * Math.cos(Math.PI * t),
+    bridgeLen
+  );
+
+  const BRIDGE_W = 4.5, BRIDGE_D = 2.4, BRIDGE_H = 1.4;
+  const N = Math.max(6, Math.ceil(bridgeLen / BRIDGE_D));
   const rotY = -(Math.PI / 2 + doorAngle);
 
-  // Quaternion combinado: primero girar en Y (dirección), luego en X (pendiente)
-  const _qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotY);
-  const _qX = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), slopeAngle);
-  const slabQ = _qY.clone().multiply(_qX);
-  const rapierSlabRot = { x: slabQ.x, y: slabQ.y, z: slabQ.z, w: slabQ.w };
+  // Quaternions reutilizables (evita garbage en el loop)
+  const _axY = new THREE.Vector3(0, 1, 0), _axX = new THREE.Vector3(1, 0, 0);
+  const _qYb = new THREE.Quaternion().setFromAxisAngle(_axY, rotY);
+  const _qXt = new THREE.Quaternion(), _qFn = new THREE.Quaternion();
 
-  const bridgeMat = new THREE.MeshLambertMaterial({ color: 0x8a7060, flatShading: true });
-  const floorIM   = new THREE.InstancedMesh(rockGeo, bridgeMat, N);
+  // ── Suelo del puente — rockMat igual que muros del castillo ─────────
+  const floorIM = new THREE.InstancedMesh(rockGeo, rockMat, N);
   floorIM.castShadow = floorIM.receiveShadow = true;
   const fd = new THREE.Object3D();
 
@@ -3581,10 +3622,14 @@ function spawnBridge() {
     const f  = (i + 0.5) / N;
     const bx = startX + (endX - startX) * f;
     const bz = startZ + (endZ - startZ) * f;
-    const by = startY + (endY - startY) * f - BRIDGE_H * 0.5;
+    const sa = archSlope(f);
+    const by = archY(f) - BRIDGE_H * 0.5;
+
+    _qXt.setFromAxisAngle(_axX, sa);
+    _qFn.copy(_qYb).multiply(_qXt);
 
     fd.position.set(bx, by, bz);
-    fd.quaternion.copy(slabQ);
+    fd.quaternion.copy(_qFn);
     fd.scale.set(BRIDGE_W / 0.68, BRIDGE_H / 1.02, BRIDGE_D / 0.68);
     fd.updateMatrix();
     floorIM.setMatrixAt(i, fd.matrix);
@@ -3593,53 +3638,43 @@ function spawnBridge() {
       rapierWorld.createCollider(
         RAPIER.ColliderDesc.cuboid(BRIDGE_W / 2, BRIDGE_H / 2, BRIDGE_D / 2)
           .setTranslation(bx, by, bz)
-          .setRotation(rapierSlabRot)
+          .setRotation({ x: _qFn.x, y: _qFn.y, z: _qFn.z, w: _qFn.w })
       );
     }
   }
   floorIM.instanceMatrix.needsUpdate = true;
   scene.add(floorIM);
 
-  // Barandillas laterales
-  const RAIL_H   = 3.0;
-  const RAIL_W   = 1.0;
-  const railOff  = (BRIDGE_W - RAIL_W) * 0.5;
-  const px = -cdz, pz = cdx; // perpendicular al puente
-
-  const railMat = new THREE.MeshLambertMaterial({ color: 0x6a5040, flatShading: true });
-  const railIM  = new THREE.InstancedMesh(rockGeo, railMat, N * 2);
-  railIM.castShadow = railIM.receiveShadow = true;
-  const _qXR  = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), slopeAngle);
-  const railQ  = _qY.clone().multiply(_qXR);
-  const rapierRailRot = { x: railQ.x, y: railQ.y, z: railQ.z, w: railQ.w };
+  // ── Almenas (merlones) en los bordes — cada 2 bloques, igual que castillo ──
+  const MERL_W = 1.3, MERL_H = 2.2, MERL_D = 1.6;
+  const railOff = (BRIDGE_W - MERL_W) * 0.5;
+  const merlPerSide = Math.ceil(N / 2);
+  const merlIM = new THREE.InstancedMesh(rockGeo, rockMat, merlPerSide * 2);
+  merlIM.castShadow = merlIM.receiveShadow = true;
   const rd = new THREE.Object3D();
   let ri = 0;
 
   for (const side of [-1, 1]) {
-    for (let i = 0; i < N; i++) {
+    for (let i = 0; i < N; i += 2) {
       const f   = (i + 0.5) / N;
       const bx  = startX + (endX - startX) * f + px * railOff * side;
       const bz  = startZ + (endZ - startZ) * f + pz * railOff * side;
-      const top = startY + (endY - startY) * f;
-      const by  = top + RAIL_H * 0.5;
+      const sa  = archSlope(f);
+      const top = archY(f);
+      const by  = top + MERL_H * 0.5;
+
+      _qXt.setFromAxisAngle(_axX, sa);
+      _qFn.copy(_qYb).multiply(_qXt);
 
       rd.position.set(bx, by, bz);
-      rd.quaternion.copy(railQ);
-      rd.scale.set(RAIL_W / 0.68, RAIL_H / 1.02, BRIDGE_D / 0.68);
+      rd.quaternion.copy(_qFn);
+      rd.scale.set(MERL_W / 0.68, MERL_H / 1.02, MERL_D / 0.68);
       rd.updateMatrix();
-      railIM.setMatrixAt(ri++, rd.matrix);
-
-      if (rapierWorld) {
-        rapierWorld.createCollider(
-          RAPIER.ColliderDesc.cuboid(RAIL_W / 2, RAIL_H / 2, BRIDGE_D / 2)
-            .setTranslation(bx, by, bz)
-            .setRotation(rapierRailRot)
-        );
-      }
+      if (ri < merlIM.count) merlIM.setMatrixAt(ri++, rd.matrix);
     }
   }
-  railIM.instanceMatrix.needsUpdate = true;
-  scene.add(railIM);
+  merlIM.instanceMatrix.needsUpdate = true;
+  scene.add(merlIM);
 }
 
 function spawnCastleTowers() {
@@ -4045,6 +4080,7 @@ async function initGame() {
   spawnVillage();
   spawnCastleTowers();
   spawnCastleRoof();
+  spawnBossSlime();
   spawnSpiralStairs();
   spawnBridge();
   buildMinimap();
