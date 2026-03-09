@@ -8,7 +8,7 @@ import RAPIER from '@dimforge/rapier3d-compat';
 // ─────────────────────────────────────────────────────────────
 const TILE  = 12;      // meters per tile (4× escala mundo)
 const WORLD = 64;      // grid size
-const EYE   = 2.0;     // eye height (m)
+const EYE   = 1.65;    // eye height (m)
 const SPEED  = 20;     // movement speed (m/s)
 
 // Tile IDs
@@ -1312,14 +1312,32 @@ async function initPhysics() {
 
 function addTerrainCollider() {
   const W = WORLD;
-  const heights = new Float32Array(W * W);
-  for (let r = 0; r < W; r++)
-    for (let c = 0; c < W; c++)
-      heights[r * W + c] = heightMap[r][c] ?? 0;
-  const scale = { x: (W - 1) * TILE, y: 1.0, z: (W - 1) * TILE };
-  const desc  = RAPIER.ColliderDesc.heightfield(W - 1, W - 1, heights, scale)
-    .setTranslation((W - 1) * TILE / 2, 0, (W - 1) * TILE / 2);
-  rapierWorld.createCollider(desc);
+  const V = W + 1; // 65 vértices por lado
+
+  // Vértices: exactamente iguales al terrain mesh visual
+  const verts = new Float32Array(V * V * 3);
+  for (let iz = 0; iz < V; iz++) {
+    for (let ix = 0; ix < V; ix++) {
+      const vi = iz * V + ix;
+      verts[vi * 3]     = ix * TILE;
+      verts[vi * 3 + 1] = vertexH(ix, iz);
+      verts[vi * 3 + 2] = iz * TILE;
+    }
+  }
+
+  // Índices: mismos triángulos que el terrain mesh visual
+  const indices = new Uint32Array(W * W * 6);
+  let ii = 0;
+  for (let iz = 0; iz < W; iz++) {
+    for (let ix = 0; ix < W; ix++) {
+      const tl = iz * V + ix,       tr = iz * V + ix + 1;
+      const bl = (iz + 1) * V + ix, br = (iz + 1) * V + ix + 1;
+      indices[ii++] = tl; indices[ii++] = bl; indices[ii++] = tr;
+      indices[ii++] = tr; indices[ii++] = bl; indices[ii++] = br;
+    }
+  }
+
+  rapierWorld.createCollider(RAPIER.ColliderDesc.trimesh(verts, indices));
 }
 
 function addWallColliders() {
@@ -2851,8 +2869,10 @@ window.addEventListener('resize', () => {
 const clock = new THREE.Clock();
 let elapsed = 0;
 
+let gameReady = false;
+
 renderer.setAnimationLoop(() => {
-  if (!worldMap.length) return; // wait for GLB load + initGame
+  if (!gameReady) return;
   const dt = Math.min(clock.getDelta(), 0.05);
   elapsed += dt;
 
@@ -3284,9 +3304,13 @@ function spawnNPCs() {
     const _vcz = VILLAGE_CZ * TILE + TILE / 2;
     const _hrot = Math.atan2(_vcx - wx, _vcz - wz); // atan2(dX, dZ) para rotación Y
 
+    // Escalar en conjunto para que los ojos del NPC queden a la altura del jugador
+    const S = EYE / 1.51;
+
     const houseGroup = new THREE.Group();
     houseGroup.position.set(wx, gy, wz);
     houseGroup.rotation.y = _hrot;
+    houseGroup.scale.setScalar(S);
 
     const wallConfigs = [
       { pos:[0, 1.2, -2.2], rot:[0, 0, 0],              scl:[3.8, 2.4, 0.5] },
@@ -3345,13 +3369,16 @@ function spawnNPCs() {
 
     // Posicionar frente a la puerta (en la dirección que apunta la puerta)
     const _dsx = Math.sin(_hrot), _dsz = Math.cos(_hrot);
-    npcGroup.position.set(wx + _dsx * 3.2, gy, wz + _dsz * 3.2);
+    const npcOffX = wx + _dsx * 3.2 * S;
+    const npcOffZ = wz + _dsz * 3.2 * S;
+    npcGroup.position.set(npcOffX, gy, npcOffZ);
     npcGroup.rotation.y = _hrot + Math.PI; // NPC mira hacia la puerta
+    npcGroup.scale.setScalar(S);
     scene.add(npcGroup);
 
     npcs.push({
       mesh: npcGroup, indicator, body: bodyMesh,
-      wx: wx + _dsx * 3.2, wz: wz + _dsz * 3.2,
+      wx: npcOffX, wz: npcOffZ,
       questId: def.questId, name: def.name,
       bobPhase: idx * 1.3,
     });
@@ -3488,6 +3515,131 @@ function spawnSpiralStairs() {
 
   stairIM.instanceMatrix.needsUpdate = true;
   scene.add(stairIM);
+}
+
+// ─────────────────────────────────────────────────────────────
+// PUENTE — Torre SW → cima muro castillo
+// ─────────────────────────────────────────────────────────────
+function spawnBridge() {
+  // Mismas constantes que buildTiles y spawnCastleTowers
+  const WLAYERS = 7;
+  const WSCALE  = TILE / (3 * 0.68);
+  const LAYER_H = 1.02 * WSCALE;        // ≈ 6.0 m por capa de muro
+
+  const towerR          = TILE * 1.3;
+  const WALL_D          = TILE * 0.55;
+  const BLOCK_H         = TILE * 0.52;
+  const innerR          = towerR - WALL_D / 2;
+  const WIN_LAYERS_START = 10;
+
+  const CASTLE_CX = 31 * TILE + TILE * 0.5;
+  const CASTLE_CZ = 17 * TILE + TILE * 0.5;
+
+  // Torre SW (tx=17, tz=24)
+  const wx = 17 * TILE + TILE * 0.5;
+  const wz = 24 * TILE + TILE * 0.5;
+  const bh = groundAt(wx, wz);
+
+  const doorAngle = Math.atan2(CASTLE_CZ - wz, CASTLE_CX - wx);
+  const cdx = Math.cos(doorAngle);
+  const cdz = Math.sin(doorAngle);
+
+  // Inicio: cara interior de la ventana al nivel del suelo de la apertura
+  const startX = wx + cdx * innerR;
+  const startZ = wz + cdz * innerR;
+  const startY = bh + BLOCK_H * WIN_LAYERS_START;
+
+  // Fin: cima del muro oeste del castillo (tx=22) siguiendo doorAngle
+  const endXTarget = 22 * TILE + TILE * 0.5;
+  const tBridge    = (endXTarget - startX) / cdx;
+  const endX       = endXTarget;
+  const endZ       = startZ + tBridge * cdz;
+  const endY       = groundAt(endX, endZ) + WLAYERS * LAYER_H;
+
+  const bridgeLen = Math.hypot(endX - startX, endZ - startZ);
+  const slopeAngle = Math.atan2(endY - startY, bridgeLen); // negativo = bajada
+
+  // Bloques del suelo — inclinados con la pendiente del puente
+  const BRIDGE_W = 5.0;
+  const BRIDGE_D = 3.2;
+  const BRIDGE_H = 1.8;
+  const N = Math.max(4, Math.ceil(bridgeLen / BRIDGE_D));
+  const rotY = -(Math.PI / 2 + doorAngle);
+
+  // Quaternion combinado: primero girar en Y (dirección), luego en X (pendiente)
+  const _qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotY);
+  const _qX = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), slopeAngle);
+  const slabQ = _qY.clone().multiply(_qX);
+  const rapierSlabRot = { x: slabQ.x, y: slabQ.y, z: slabQ.z, w: slabQ.w };
+
+  const bridgeMat = new THREE.MeshLambertMaterial({ color: 0x8a7060, flatShading: true });
+  const floorIM   = new THREE.InstancedMesh(rockGeo, bridgeMat, N);
+  floorIM.castShadow = floorIM.receiveShadow = true;
+  const fd = new THREE.Object3D();
+
+  for (let i = 0; i < N; i++) {
+    const f  = (i + 0.5) / N;
+    const bx = startX + (endX - startX) * f;
+    const bz = startZ + (endZ - startZ) * f;
+    const by = startY + (endY - startY) * f - BRIDGE_H * 0.5;
+
+    fd.position.set(bx, by, bz);
+    fd.quaternion.copy(slabQ);
+    fd.scale.set(BRIDGE_W / 0.68, BRIDGE_H / 1.02, BRIDGE_D / 0.68);
+    fd.updateMatrix();
+    floorIM.setMatrixAt(i, fd.matrix);
+
+    if (rapierWorld) {
+      rapierWorld.createCollider(
+        RAPIER.ColliderDesc.cuboid(BRIDGE_W / 2, BRIDGE_H / 2, BRIDGE_D / 2)
+          .setTranslation(bx, by, bz)
+          .setRotation(rapierSlabRot)
+      );
+    }
+  }
+  floorIM.instanceMatrix.needsUpdate = true;
+  scene.add(floorIM);
+
+  // Barandillas laterales
+  const RAIL_H   = 3.0;
+  const RAIL_W   = 1.0;
+  const railOff  = (BRIDGE_W - RAIL_W) * 0.5;
+  const px = -cdz, pz = cdx; // perpendicular al puente
+
+  const railMat = new THREE.MeshLambertMaterial({ color: 0x6a5040, flatShading: true });
+  const railIM  = new THREE.InstancedMesh(rockGeo, railMat, N * 2);
+  railIM.castShadow = railIM.receiveShadow = true;
+  const _qXR  = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), slopeAngle);
+  const railQ  = _qY.clone().multiply(_qXR);
+  const rapierRailRot = { x: railQ.x, y: railQ.y, z: railQ.z, w: railQ.w };
+  const rd = new THREE.Object3D();
+  let ri = 0;
+
+  for (const side of [-1, 1]) {
+    for (let i = 0; i < N; i++) {
+      const f   = (i + 0.5) / N;
+      const bx  = startX + (endX - startX) * f + px * railOff * side;
+      const bz  = startZ + (endZ - startZ) * f + pz * railOff * side;
+      const top = startY + (endY - startY) * f;
+      const by  = top + RAIL_H * 0.5;
+
+      rd.position.set(bx, by, bz);
+      rd.quaternion.copy(railQ);
+      rd.scale.set(RAIL_W / 0.68, RAIL_H / 1.02, BRIDGE_D / 0.68);
+      rd.updateMatrix();
+      railIM.setMatrixAt(ri++, rd.matrix);
+
+      if (rapierWorld) {
+        rapierWorld.createCollider(
+          RAPIER.ColliderDesc.cuboid(RAIL_W / 2, RAIL_H / 2, BRIDGE_D / 2)
+            .setTranslation(bx, by, bz)
+            .setRotation(rapierRailRot)
+        );
+      }
+    }
+  }
+  railIM.instanceMatrix.needsUpdate = true;
+  scene.add(railIM);
 }
 
 function spawnCastleTowers() {
@@ -3883,8 +4035,8 @@ async function initGame() {
   addWallColliders();
   buildScene();
   spawnPlayer();
-  // Sincronizar posición inicial del jugador con Rapier
-  playerBody.setTranslation({ x: rig.position.x, y: rig.position.y + CAPS_OFFSET, z: rig.position.z }, true);
+  // Sincronizar posición inicial del jugador con Rapier (+5m extra para que caiga sobre el suelo)
+  playerBody.setTranslation({ x: rig.position.x, y: rig.position.y + CAPS_OFFSET + 5, z: rig.position.z }, true);
   spawnEnemies();
   spawnPushRocks();
   spawnRockTowers();
@@ -3894,10 +4046,40 @@ async function initGame() {
   spawnCastleTowers();
   spawnCastleRoof();
   spawnSpiralStairs();
+  spawnBridge();
   buildMinimap();
   buildHUD();
   updateStarCounter();
   updateQuestHUD();
+
+  // Pre-simular: dejar caer al jugador con gravedad hasta que toque el suelo
+  document.getElementById('loading-msg').textContent = 'INICIANDO FÍSICA...';
+  rapierWorld.timestep = 1 / 60;
+  let _preVY = 0;
+  for (let i = 0; i < 300; i++) {
+    _preVY -= GRAVITY * (1 / 60);
+    const _prePos = playerBody.translation();
+    charCtrl.computeColliderMovement(
+      playerCollider,
+      { x: 0, y: _preVY * (1 / 60), z: 0 },
+      true, null, col => col !== playerCollider
+    );
+    const _cm = charCtrl.computedMovement();
+    playerBody.setNextKinematicTranslation({
+      x: _prePos.x, y: _prePos.y + _cm.y, z: _prePos.z
+    });
+    rapierWorld.step();
+    if (charCtrl.computedGrounded()) break;
+  }
+  // Sincronizar rig con posición final del cuerpo
+  const settled = playerBody.translation();
+  rig.position.x = settled.x;
+  rig.position.z = settled.z;
+  rig.position.y = settled.y - CAPS_OFFSET;
+
+  gameReady = true;
+  const loadDiv = document.getElementById('loading');
+  if (loadDiv) loadDiv.style.display = 'none';
 }
 
 // ─────────────────────────────────────────────────────────────
