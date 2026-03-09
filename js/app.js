@@ -3462,7 +3462,7 @@ function spawnCastleRoof() {
 function spawnBossSlime() {
   const WLAYERS = 7, WSCALE = TILE / (3 * 0.68), LAYER_H = 1.02 * WSCALE;
   const roofY = (WLAYERS - 1) * LAYER_H;
-  const SC = 4.0; // escala respecto al slime normal
+  const SC = 50.0; // escala respecto al slime normal
 
   const bx = 31 * TILE + TILE / 2;
   const bz = 17 * TILE + TILE / 2;
