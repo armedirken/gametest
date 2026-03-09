@@ -172,8 +172,8 @@ const _tmpV3 = new THREE.Vector3();
 const coinDummy = new THREE.Object3D(); // reutilizado para actualizar coinIM
 let treeLists = [[], [], []];  // [forestList, fieldList, mountainList]
 const treePartsList = [
-  _buildTreeParts(42),  // pino tipo A: bosque + montaña
-  _buildTreeParts(97),  // pino tipo B: pradera (seed distinto → forma ligeramente diferente)
+  [_buildTreeParts(42,0), _buildTreeParts(42,1), _buildTreeParts(42,2)],  // bosque+montaña
+  [_buildTreeParts(97,0), _buildTreeParts(97,1), _buildTreeParts(97,2)],  // pradera
   null,
 ];
 
@@ -829,26 +829,38 @@ function buildScene() {
   const TREE_VARY = [8.0, 7.0, 8.0]; // rango → 1.2 a 9.2 m
 
   treeLists.forEach((list, mi) => {
-    const parts = treePartsList[mi];
-    if (!list.length || !parts?.length) return;
-    parts.forEach(({ geo, mat }) => {
-      const im = new THREE.InstancedMesh(geo, mat, list.length);
-      im.castShadow = im.receiveShadow = true;
-      list.forEach(([x, z], i) => {
-        const wx = x * TILE + TILE / 2, wz = z * TILE + TILE / 2;
-        const sc = TREE_BASE[mi] + hash(x, z, worldSeed + 77 + mi * 13) * TREE_VARY[mi];
-        const ry = hash(x, z, worldSeed + 7  + mi * 17) * Math.PI * 2;
-        // Inclinación aleatoria suave — cada árbol se inclina en dirección distinta
-        const lx = (hash(x, z, worldSeed + 91) - 0.5) * 0.18;
-        const lz = (hash(x, z, worldSeed + 92) - 0.5) * 0.18;
-        dummy.position.set(wx, groundAt(wx, wz) - sc * 0.06, wz);
-        dummy.rotation.set(lx, ry, lz);
-        dummy.scale.setScalar(sc);
-        dummy.updateMatrix();
-        im.setMatrixAt(i, dummy.matrix);
+    const partsArr = treePartsList[mi];
+    if (!list.length || !partsArr) return;
+
+    // Clasificar árboles por tamaño: 0=pequeño(<3.5), 1=mediano(3.5-6.5), 2=grande(>6.5)
+    const buckets = [[], [], []];
+    list.forEach(([x, z]) => {
+      const sc = TREE_BASE[mi] + hash(x, z, worldSeed + 77 + mi * 13) * TREE_VARY[mi];
+      const cls = sc < 3.5 ? 0 : sc < 6.5 ? 1 : 2;
+      buckets[cls].push([x, z]);
+    });
+
+    buckets.forEach((bucket, cls) => {
+      if (!bucket.length) return;
+      const parts = partsArr[cls];
+      parts.forEach(({ geo, mat }) => {
+        const im = new THREE.InstancedMesh(geo, mat, bucket.length);
+        im.castShadow = im.receiveShadow = true;
+        bucket.forEach(([x, z], i) => {
+          const wx = x * TILE + TILE / 2, wz = z * TILE + TILE / 2;
+          const sc = TREE_BASE[mi] + hash(x, z, worldSeed + 77 + mi * 13) * TREE_VARY[mi];
+          const ry = hash(x, z, worldSeed + 7  + mi * 17) * Math.PI * 2;
+          const lx = (hash(x, z, worldSeed + 91) - 0.5) * 0.18;
+          const lz = (hash(x, z, worldSeed + 92) - 0.5) * 0.18;
+          dummy.position.set(wx, groundAt(wx, wz) - sc * 0.06, wz);
+          dummy.rotation.set(lx, ry, lz);
+          dummy.scale.setScalar(sc);
+          dummy.updateMatrix();
+          im.setMatrixAt(i, dummy.matrix);
+        });
+        im.instanceMatrix.needsUpdate = true;
+        scene.add(im);
       });
-      im.instanceMatrix.needsUpdate = true;
-      scene.add(im);
     });
   });
 
@@ -1764,7 +1776,8 @@ function updateEnemies(dt) {
     const dist = Math.sqrt(dx * dx + dz * dz);
 
     // Aggro transitions
-    if (!e.aggroed && dist < 8)  {
+    const aggroR = e.aggroRange ?? 8;
+    if (!e.aggroed && dist < aggroR)  {
       e.aggroed = true; e.patrolTarget = null; sfx.squeak();
       // Alert icon (mejora #8)
       const alertGeo = new THREE.SphereGeometry(0.10, 5, 4);
@@ -1775,7 +1788,7 @@ function updateEnemies(dt) {
       scene.add(alertMesh);
       enemyAlertList.push({ mesh: alertMesh, timer: 0.8 });
     }
-    if (e.aggroed  && dist > 12) {
+    if (e.aggroed  && dist > aggroR * 1.5) {
       e.aggroed = false;
       e.lungePhase = 'cooldown'; e.lungeT = 0.4;
       e.mesh.rotation.x = 0; e.mesh.rotation.z = 0;
@@ -1819,15 +1832,17 @@ function updateEnemies(dt) {
 
     if (e.aggroed) {
       // ── AGGROED ──────────────────────────────────────────────
-      if (dist > LUNGE_RANGE) {
+      const lungeR = e.lungeRange ?? LUNGE_RANGE;
+      if (dist > lungeR) {
         // Chase — walk towards player with bounce
-        const spd = 2.2 * dt;
+        const spd = (e.chaseSpeed ?? 2.2) * dt;
         e.mesh.position.x += dx / dist * spd;
         e.mesh.position.z += dz / dist * spd;
         faceToward(px, pz);
         e.mesh.rotation.x = 0; e.mesh.rotation.z = 0;
         body.position.y = 0.3 + Math.abs(Math.sin(elapsed * 9 + e.phase)) * 0.09;
         if (e.lungePhase !== 'cooldown') { e.lungePhase = 'cooldown'; e.lungeT = 0.3; }
+
       } else {
         // In lunge range — run lunge cycle
         e.lungeT -= dt;
@@ -1857,13 +1872,13 @@ function updateEnemies(dt) {
           body.position.y = 0.3;
           const targetY = rig.position.y + EYE * 0.55; // pecho del jugador
           e.mesh.position.y += (targetY - e.mesh.position.y) * Math.min(1, 12 * dt);
-          const newX = e.mesh.position.x + e.lungeDir.x * 7 * dt;
-          const newZ = e.mesh.position.z + e.lungeDir.z * 7 * dt;
+          const newX = e.mesh.position.x + e.lungeDir.x * (e.lungeSpeed ?? 7) * dt;
+          const newZ = e.mesh.position.z + e.lungeDir.z * (e.lungeSpeed ?? 7) * dt;
           if (tileAt(newX, newZ) !== T.DEEP) {
             e.mesh.position.x = newX;
             e.mesh.position.z = newZ;
           }
-          if (!e.lungeDamaged && dist < 1.4) {
+          if (!e.lungeDamaged && dist < (e.hitRange ?? 1.4)) {
             e.lungeDamaged = true;
             if (!isShieldActive()) {        // mejora #20: escudo bloquea daño
               playerHP = Math.max(0, playerHP - 1);
@@ -1883,8 +1898,8 @@ function updateEnemies(dt) {
           }
 
         } else if (e.lungePhase === 'retreat') {
-          // Vuelve al suelo y retrocede
-          const groundY = groundAt(e.mesh.position.x, e.mesh.position.z);
+          // Vuelve al suelo y retrocede (usa fixedY para el boss)
+          const groundY = (e.fixedY !== undefined) ? e.fixedY : groundAt(e.mesh.position.x, e.mesh.position.z);
           e.mesh.position.y += (groundY - e.mesh.position.y) * Math.min(1, 10 * dt);
           const newX = e.mesh.position.x + e.lungeDir.x * 4.5 * dt;
           const newZ = e.mesh.position.z + e.lungeDir.z * 4.5 * dt;
@@ -1938,7 +1953,7 @@ function updateEnemies(dt) {
     e.hitCooldown = Math.max(0, e.hitCooldown - dt);
     if (hasSword && e.hitCooldown === 0) {
       const tipDist = swordTipWorld.distanceTo(e.mesh.position);
-      if (tipDist < 1.2 && swordVel > 1.5) {
+      if (tipDist < (e.swordHitRange ?? 1.2) && swordVel > 1.5) {
         e.hp--; e.hitCooldown = 0.4; sfx.hit();
         e.hitFlashT = 0.20; // timer-based (no setTimeout)
         e.squashT   = 0.12; // squash visual
@@ -1954,7 +1969,7 @@ function updateEnemies(dt) {
       }
     }
     // Mouse click hit (desktop) — Space es para saltar
-    if (mouseAttack && dist < 2.5 && e.hitCooldown === 0) {
+    if (mouseAttack && dist < (e.hitRange ?? 2.5) && e.hitCooldown === 0) {
       e.hp--; e.hitCooldown = 0.5; sfx.hit();
       e.hitFlashT = 0.20; e.squashT = 0.12;
       if (e.hp <= 0) {
@@ -3484,16 +3499,17 @@ function spawnBossSlime() {
     g.add(eye, pupil);
   }
 
-  g.position.set(bx, roofY, bz);
+  const bossFloorY = roofY + 0.6;   // top surface of roof physics collider
+  g.position.set(bx, bossFloorY, bz);
   scene.add(g);
 
   // Colisionador estático para que el jugador no lo traspase
   if (rapierWorld) {
-    const bodyR = 0.42 * SC;       // radio esfera
-    const bodyH = bodyR * 0.65;    // mitad de altura aplastada
+    const bodyR = 0.42 * SC;
+    const bodyH = bodyR * 0.65;
     rapierWorld.createCollider(
       RAPIER.ColliderDesc.capsule(bodyH * 0.3, bodyR * 0.85)
-        .setTranslation(bx, roofY + 0.3 * SC + bodyH * 0.3, bz)
+        .setTranslation(bx, bossFloorY + 0.3 * SC + bodyH * 0.3, bz)
     );
   }
 
@@ -3505,7 +3521,13 @@ function spawnBossSlime() {
     lungePhase: 'cooldown', lungeT: 2.0,
     lungeDir: new THREE.Vector3(), lungeDamaged: false,
     phase: 0,
-    fixedY: roofY,          // no usar groundAt — siempre sobre el techo
+    fixedY: bossFloorY,   // no usar groundAt — siempre sobre el techo
+    aggroRange: 55,        // ve al jugador desde lejos
+    lungeRange: 9.5,       // inicia ataque antes de que el colisionador lo bloquee
+    hitRange:   7.5,       // impacto al tocar el cuerpo del boss
+    swordHitRange: 8.5,   // rango para que espada del jugador golpee al boss
+    chaseSpeed: 4.5,       // m/s persecución
+    lungeSpeed: 16.0,      // m/s durante el lunge
     _bossMat: bossMat, _bossBody: body, _bossScale: SC,
   });
 }
@@ -4201,26 +4223,36 @@ function _makeRockGeo(seed) {
 // GENERADOR PROCEDURAL DE PINOS LOW-POLY
 // seed distinto → forma ligeramente diferente (tiers, radios, drift)
 // ─────────────────────────────────────────────────────────────
-function _buildTreeParts(seed) {
-  const trunkMat = new THREE.MeshLambertMaterial({ color: 0x5a3518, flatShading: true });
-  const leafMat  = new THREE.MeshLambertMaterial({ color: 0x1d7a22, flatShading: true });
+function _buildTreeParts(seed, sizeClass = 1) {
+  // sizeClass: 0=pequeño/esbelto/verde claro, 1=mediano, 2=grande/frondoso/verde oscuro
+  const leafColors  = [0x7ec850, 0x2d8b2d, 0x1a4c1a];
+  const trunkColors = [0x7a5530, 0x5a3518, 0x3d2010];
+  const trunkMat = new THREE.MeshLambertMaterial({ color: trunkColors[sizeClass], flatShading: true });
+  const leafMat  = new THREE.MeshLambertMaterial({ color: leafColors[sizeClass],  flatShading: true });
 
-  // Tronco — cilindro pentagonal esbelto
-  const trunkGeo = new THREE.CylinderGeometry(0.03, 0.09, 0.42, 5, 1);
-  trunkGeo.translate(0, 0.21, 0);
+  // Tronco — más esbelto para pequeños, más grueso para grandes
+  const trR  = [0.02, 0.03, 0.05][sizeClass];
+  const trRB = [0.05, 0.09, 0.14][sizeClass];
+  const trH  = [0.28, 0.42, 0.58][sizeClass];
+  const trunkGeo = new THREE.CylinderGeometry(trR, trRB, trH, 5, 1);
+  trunkGeo.translate(0, trH / 2, 0);
 
-  // Copa — conos apilados con drift acumulativo (curvatura natural)
-  const tiers = 3 + Math.floor(hash(seed, 0, 1) * 2); // 3-4 niveles
+  // Copa — menos tiers y más estrecha para pequeños, más tiers y frondosa para grandes
+  const tierMin   = [2, 3, 4][sizeClass];
+  const tierExtra = [1, 2, 2][sizeClass];
+  const tiers = tierMin + Math.floor(hash(seed, 0, 1) * tierExtra);
+  const rBase = [0.30, 0.46, 0.62][sizeClass];
+  const rTop  = [0.08, 0.16, 0.24][sizeClass];
+
   const coneParts = [];
-  let cx = 0, cz = 0; // posición acumulada del eje (deriva del árbol)
+  let cx = 0, cz = 0;
   for (let i = 0; i < tiers; i++) {
     const t   = i / tiers;
-    const r   = 0.46 - t * 0.30;
+    const r   = rBase - t * (rBase - rTop);
     const h   = 0.38 + (hash(seed, i, 2) - 0.5) * 0.10;
     const y   = 0.34 + i * 0.23;
-    const rot = i * Math.PI * 2 * 0.618; // ángulo dorado
+    const rot = i * Math.PI * 2 * 0.618;
     const seg = 5 + (i & 1);
-    // Pequeño drift acumulativo → cada nivel se desplaza ligeramente del anterior
     cx += (hash(seed, i, 14) - 0.5) * 0.05;
     cz += (hash(seed, i, 15) - 0.5) * 0.05;
     const cone = new THREE.ConeGeometry(r, h, seg, 1);
