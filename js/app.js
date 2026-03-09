@@ -5,10 +5,10 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 // ─────────────────────────────────────────────────────────────
 // CONSTANTS
 // ─────────────────────────────────────────────────────────────
-const TILE  = 3;       // meters per tile
+const TILE  = 12;      // meters per tile (4× escala mundo)
 const WORLD = 64;      // grid size
-const EYE   = 1.7;     // eye height (m)
-const SPEED  = 6;      // movement speed (m/s)
+const EYE   = 2.0;     // eye height (m)
+const SPEED  = 20;     // movement speed (m/s)
 
 // Tile IDs
 const T = Object.freeze({
@@ -73,7 +73,8 @@ const _occupied = new Set(); // tiles ocupados: árboles + casas NPC → evitar 
 let stars = [];
 
 const pushRocks       = [];
-const towerObstacles  = []; // { x, z, r } — colisión cilíndrica de torres
+const towerObstacles  = []; // { x, z, r } — colisión cilíndrica de torres decorativas
+const castleTowerWalls = []; // { cx, cz, innerR, outerR, midR, gaps[] } — muros de las torres del castillo
 const dragonRoosts    = []; // { x, z, topY } — cima de cada torre con dragón
 const dragons         = []; // objetos dragón activos
 const fireBalls       = []; // { mesh, vx, vy, vz, life } — bolas de fuego
@@ -83,8 +84,8 @@ const npcs = [];
 // ── Aldea de Eryndell — configuración circular ────────────────
 const VILLAGE_CX         = 27;              // tile centro X
 const VILLAGE_CZ         = 33;              // tile centro Z
-const VILLAGE_R          = 8;               // radio del suelo (tiles)
-const VILLAGE_WALL_R     = 9;               // radio del muro  (tiles)
+const VILLAGE_R          = 2;               // radio del suelo (tiles) — aldea pequeña
+const VILLAGE_WALL_R     = 3;               // radio del muro  (tiles)
 // 3 entradas: Sur, Noroeste, Noreste (ángulos desde +X en plano XZ)
 const VILLAGE_ENT_ANGLES = [Math.PI / 2, Math.PI * 4 / 3, Math.PI * 5 / 3];
 const VILLAGE_ENT_HALF   = 0.22;            // semi-apertura por entrada (rad)
@@ -92,11 +93,11 @@ const VILLAGE_ENT_HALF   = 0.22;            // semi-apertura por entrada (rad)
 // Posiciones en anillo circular radio=5 alrededor de (VILLAGE_CX=27, VILLAGE_CZ=33)
 // Ángulos: 0° E, 72° SE, 144° SW, 216° NW, 288° NE
 const NPC_DEFS = [
-  { tx:32, tz:33, name:'Aldeana',  color:0xff9999, questId:0 }, // E
-  { tx:29, tz:38, name:'Herrero',  color:0xaaaaff, questId:1 }, // SE
-  { tx:23, tz:36, name:'Maga',     color:0xcc88ff, questId:2 }, // SW
-  { tx:23, tz:30, name:'Mercader', color:0xffcc66, questId:3 }, // NW
-  { tx:29, tz:28, name:'Ermitaño', color:0x99ffcc, questId:4 }, // NE
+  { tx:28, tz:33, name:'Aldeana',  color:0xff9999, questId:0 }, // E
+  { tx:27, tz:34, name:'Herrero',  color:0xaaaaff, questId:1 }, // SE
+  { tx:26, tz:34, name:'Maga',     color:0xcc88ff, questId:2 }, // SW
+  { tx:27, tz:32, name:'Mercader', color:0xffcc66, questId:3 }, // NW
+  { tx:28, tz:32, name:'Ermitaño', color:0x99ffcc, questId:4 }, // NE
 ];
 const QUEST_DEFS = [
   { id:0, title:'Las Monedas Perdidas',    desc:'Recoge 30 monedas doradas\nesparcidas por el mundo.',   goal:30, type:'coins',   reward:'un amuleto de suerte' },
@@ -117,6 +118,21 @@ let castleEntered  = false;
 let questHudEl     = null;
 let npcDlgCtx = null, npcDlgTex = null, npcDlgMesh = null;
 let _vrAWas   = false;
+
+// ── Salto y física ────────────────────────────────────────────
+let jumpVY      = 0;
+let onGround    = true;
+let jumpPressed = false;
+const JUMP_VY   = 22;   // impulso inicial al saltar (m/s)
+const GRAVITY   = 50;   // aceleración gravitatoria (m/s²)
+const stairSteps = [];  // { wx, wz, topY, r } — plataformas discretas de escalera
+let coyoteTimer = 0;    // tiempo de gracia al salir del borde de un escalón (s)
+let lastStepY   = null; // último suelo de escalón detectado
+
+// ── Indicador de bioma ────────────────────────────────────────
+let biomeEl        = null;
+let lastBiome      = '';
+let biomeHideTimer = 0;
 
 // ── Mejoras globales ──────────────────────────────────────────
 let playerShadow   = null;
@@ -170,14 +186,10 @@ function generateMap() {
 
   // ── Biome zones (painted bottom-to-top, later wins) ─────────
 
-  // Ocean border (impassable edges)
-  paintRect(0, 0, WORLD, 2,      T.WATER);
-  paintRect(0, WORLD-2, WORLD, WORLD, T.WATER);
-  paintRect(0, 0, 2, WORLD,     T.WATER);
-  paintRect(WORLD-2, 0, WORLD, WORLD, T.WATER);
-  paintRect(0, 0, WORLD, 1,      T.DEEP);
+  // Bordes mínimos garantizados (se refuerzan con máscara orgánica más adelante)
+  paintRect(0, 0, WORLD, 1, T.DEEP);
   paintRect(0, WORLD-1, WORLD, WORLD, T.DEEP);
-  paintRect(0, 0, 1, WORLD,     T.DEEP);
+  paintRect(0, 0, 1, WORLD, T.DEEP);
   paintRect(WORLD-1, 0, WORLD, WORLD, T.DEEP);
 
   // ── NORTH ─────────────────────────────────────────────────
@@ -192,7 +204,7 @@ function generateMap() {
   // Lago Cristal (agua/hielo, noreste)
   paintRect(46, 2, 62, 16, T.WATER);
 
-  // Meseta NE — anula parte de Lago Cristal para el castillo de monte
+  // Meseta NE — montaña natural (castillo NE eliminado)
   paintRect(40, 2, 60, 12, T.MOUND);
 
   // ── CENTER ────────────────────────────────────────────────
@@ -265,6 +277,36 @@ function generateMap() {
       if (_dx*_dx + _dz*_dz <= VILLAGE_R * VILLAGE_R) worldMap[z][x] = T.PATH;
     }
 
+  // ── FORMA DE ISLA ORGÁNICA ────────────────────────────────
+  // Costa irregular con FBM: sur=playas, norte/este/oeste=acantilados
+  for (let z = 0; z < WORLD; z++) {
+    for (let x = 0; x < WORLD; x++) {
+      const t = worldMap[z][x];
+      if (t === T.DWALL || t === T.DFLOOR) continue;
+      // Distancia al borde más cercano (tiles)
+      const edgeDist = Math.min(x, z, WORLD - 1 - x, WORLD - 1 - z);
+      // Ruido FBM que varía la línea de costa 0-5 tiles hacia adentro
+      const coastNoise = fbm(x / 6.5, z / 6.5, 3, worldSeed + 500) * 5.0;
+      const eff = edgeDist - coastNoise;
+      if (eff < 0) {
+        // Erosionado por ruido → océano profundo (acantilado)
+        worldMap[z][x] = T.DEEP;
+      } else if (eff < 2.0) {
+        // Franja costera: sur=arena, resto=agua (acantilados sin playa)
+        const isSouth = z > WORLD * 0.72;
+        worldMap[z][x] = isSouth ? T.SAND : T.WATER;
+      } else if (eff < 4.5 && z > WORLD * 0.78) {
+        // Playa extendida en la costa sur
+        worldMap[z][x] = T.SAND;
+      }
+    }
+  }
+  // Borde exterior garantizado profundo
+  for (let i = 0; i < WORLD; i++) {
+    worldMap[0][i] = worldMap[WORLD-1][i] = T.DEEP;
+    worldMap[i][0] = worldMap[i][WORLD-1] = T.DEEP;
+  }
+
   // ── HEIGHT MAP ───────────────────────────────────────────
   heightMap = [];
   for (let z = 0; z < WORLD; z++) {
@@ -276,20 +318,13 @@ function generateMap() {
         case T.DEEP:   heightMap[z][x] = -0.5;         break;
         case T.WATER:  heightMap[z][x] = -0.15;        break;
         case T.SAND:   heightMap[z][x] =  0.05;        break;
-        case T.GRASS:  heightMap[z][x] =  n * 2.8;       break;
-        case T.FOREST: heightMap[z][x] =  0.6 + n*5.0;   break;
-        case T.MOUND:  heightMap[z][x] =  1.5 + n*23.5;  break; // rango 1.5-25m
+        case T.GRASS:  heightMap[z][x] =  n * 9.0;        break; // colinas pronunciadas
+        case T.FOREST: heightMap[z][x] =  0.8 + n*13.0;  break; // bosques con relieve
+        case T.MOUND:  heightMap[z][x] =  2.0 + n*28.0;  break; // montañas altas
         default:       heightMap[z][x] =  0;            break;
       }
     }
   }
-
-  // ── Plateau pre-blur — meseta amplia NE para el castillo de Monte Sombrío ──
-  const MFORT_H = 14;
-  for (let z = 2; z < 12; z++)
-    for (let x = 40; x < 62; x++)
-      if (worldMap[z][x] !== T.DEEP)
-        heightMap[z][x] = MFORT_H; // meseta plana antes del blur → pendiente suave al borde
 
   // ── Blur 3 pasadas — pendientes suaves sin acantilados bruscos ──
   for (let pass = 0; pass < 3; pass++) {
@@ -311,6 +346,15 @@ function generateMap() {
     heightMap = blurred;
   }
 
+  // ── Planicie del Castillo Principal — aplicada POST-blur para no ser anulada ──
+  for (let z = 7; z < 27; z++)
+    for (let x = 17; x < 45; x++) {
+      if (worldMap[z][x] === T.DWALL || worldMap[z][x] === T.DFLOOR)
+        heightMap[z][x] = 0; // piso plano exacto para castillo
+      else
+        heightMap[z][x] = 0.3; // entorno plano
+    }
+
   // ── Elevar suelo circular de la aldea — mínimo 0.5m para evitar filtración del océano ──
   for (let z = VILLAGE_CZ - VILLAGE_R - 1; z <= VILLAGE_CZ + VILLAGE_R + 1; z++)
     for (let x = VILLAGE_CX - VILLAGE_R - 1; x <= VILLAGE_CX + VILLAGE_R + 1; x++) {
@@ -319,17 +363,6 @@ function generateMap() {
       if (_dx*_dx + _dz*_dz <= VILLAGE_R * VILLAGE_R)
         heightMap[z][x] = Math.max(heightMap[z][x], 0.5);
     }
-
-  // ── Castillo Montaña — castle NE en la meseta (14x7 tiles) ──
-  for (let z = 3; z < 10; z++) {
-    for (let x = 44; x < 58; x++) {
-      const wall = z === 3 || z === 9 || x === 44 || x === 57;
-      worldMap[z][x] = wall ? T.DWALL : T.DFLOOR;
-      heightMap[z][x] = MFORT_H; // restaurar tras blur
-    }
-  }
-  worldMap[9][50] = T.PATH;
-  worldMap[9][51] = T.PATH; // puerta sur (2 tiles de ancho)
 
   // ── TREE / ROCK / STAR LISTS ─────────────────────────────
   starList = [];
@@ -352,27 +385,46 @@ function generateMap() {
       const t   = worldMap[z][x];
       const key = x + ',' + z;
 
-      // Tree 0 — canopy denso (Bosque Eterno, bosque este, franja oeste)
-      if (t === T.FOREST && !_occupied.has(key) && hash(x, z, worldSeed+1) > 0.12) {
-        treeLists[0].push([x, z]); _occupied.add(key);
+      // Trees — múltiples árboles por tile con offsets sub-tile (×10 densidad)
+      // Offsets en fracciones de tile: 4 posiciones por tile
+      const treeOffsets = [[0,0],[0.45,0.2],[0.2,0.45],[-0.3,0.35]];
+
+      // Excluir árboles dentro de las torres (radio ~3 tiles alrededor de cada una)
+      const nearTower = (Math.abs(x - 17) < 3 && Math.abs(z - 24) < 3)
+                     || (Math.abs(x - 44) < 3 && Math.abs(z - 24) < 3);
+
+      if (t === T.FOREST && !nearTower) {
+        for (let ti = 0; ti < treeOffsets.length; ti++) {
+          const tk = key + '_' + ti;
+          if (!_occupied.has(tk) && hash(x + ti * 7, z + ti * 11, worldSeed + 1 + ti * 50) > 0.05) {
+            treeLists[0].push([x + treeOffsets[ti][0], z + treeOffsets[ti][1]]);
+            _occupied.add(tk);
+          }
+        }
+        _occupied.add(key); // bloquea coins/rocas en este tile
       }
 
-      // Tree 1 — praderas / ribera (Llanos del Sur de Eryndell)
-      if (t === T.GRASS && !_occupied.has(key)) {
+      if (t === T.GRASS && !_occupied.has(key) && !nearTower) {
         const nearWater = [[z-1,x],[z+1,x],[z,x-1],[z,x+1]].some(
           ([nz,nx]) => nz>=0&&nz<WORLD&&nx>=0&&nx<WORLD &&
                        (worldMap[nz][nx]===T.WATER||worldMap[nz][nx]===T.DEEP));
-        if (hash(x, z, worldSeed+11) > (nearWater ? 0.68 : 0.88)) {
-          treeLists[1].push([x, z]); _occupied.add(key);
+        const thr = nearWater ? 0.30 : 0.45;
+        for (let ti = 0; ti < treeOffsets.length; ti++) {
+          if (hash(x + ti * 9, z + ti * 13, worldSeed + 11 + ti * 50) > thr) {
+            treeLists[1].push([x + treeOffsets[ti][0], z + treeOffsets[ti][1]]);
+          }
         }
+        if (hash(x, z, worldSeed + 11) > thr) _occupied.add(key);
       }
 
-      // Tree 0 también en zonas de montaña
-      if (t === T.MOUND && !_occupied.has(key) && hash(x, z, worldSeed+21) > 0.70) {
-        treeLists[0].push([x, z]); _occupied.add(key);
-      }
-      if (t === T.FOREST && !_occupied.has(key) && (z < 14 || x > 40) && hash(x, z, worldSeed+22) > 0.55) {
-        treeLists[0].push([x, z]); _occupied.add(key);
+      // Montaña — 3 árboles por tile
+      if (t === T.MOUND && !_occupied.has(key) && !nearTower) {
+        for (let ti = 0; ti < 3; ti++) {
+          if (hash(x + ti * 5, z + ti * 7, worldSeed + 21 + ti * 50) > 0.20) {
+            treeLists[0].push([x + treeOffsets[ti][0], z + treeOffsets[ti][1]]);
+          }
+        }
+        _occupied.add(key);
       }
 
       // rockList decorativo eliminado — las rocas "balón" (DodecahedronGeometry) ya no se usan
@@ -400,11 +452,6 @@ function carvePaths() {
   for (let z = 2; z < 12; z++) {
     if (SAFE(worldMap[z][30])) worldMap[z][30] = T.PATH;
   }
-  // Path east → Mountain Castle NE (z=10, x=31 to x=51)
-  for (let x = 31; x <= 51; x++)
-    if (SAFE(worldMap[10][x])) worldMap[10][x] = T.PATH;
-  // Path north to castle south gate (x=50, z=9-10)
-  if (SAFE(worldMap[9][50])) worldMap[9][50] = T.PATH;
   // Camino E-O central de Eryndell
   for (let x = 6; x < 56; x++) {
     if (SAFE(worldMap[34][x])) worldMap[34][x] = T.PATH;
@@ -436,6 +483,32 @@ function carvePaths() {
   // Ice Palace (SE): camino oeste hasta main road
   for (let x = 32; x < 44; x++)
     if (SAFE(worldMap[52][x])) worldMap[52][x] = T.PATH;
+
+  // ── Ríos adicionales — serpentean por la isla ───────────────
+  // Río del Bosque: baja desde el norte por el bosque oeste (x≈14) hasta el sur
+  for (let z = 5; z < 40; z++) {
+    const rx = 14 + Math.round(Math.sin(z * 0.4) * 2);
+    for (let w = 0; w < 2; w++) {
+      const tx = rx + w;
+      if (tx >= 0 && tx < WORLD && SAFE(worldMap[z][tx]))
+        worldMap[z][tx] = T.WATER;
+    }
+  }
+  // Río del Este: baja desde montañas este hacia el lago del sur
+  for (let z = 18; z < 48; z++) {
+    const rx = 44 + Math.round(Math.sin(z * 0.35) * 3);
+    for (let w = 0; w < 2; w++) {
+      const tx = rx + w;
+      if (tx >= 0 && tx < WORLD && SAFE(worldMap[z][tx]))
+        worldMap[z][tx] = T.WATER;
+    }
+  }
+  // Río del Sur: cruce horizontal entre desierto y pradera
+  for (let x = 6; x < 36; x++) {
+    const rz = 44 + Math.round(Math.sin(x * 0.5) * 2);
+    if (rz >= 0 && rz < WORLD && SAFE(worldMap[rz][x]))
+      worldMap[rz][x] = T.WATER;
+  }
 }
 
 function placeDungeons() {
@@ -466,7 +539,7 @@ function placeDungeons() {
 // ─────────────────────────────────────────────────────────────
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(COLOR.SKY);
-scene.fog        = new THREE.FogExp2(0xd0eaf8, 0.024); // neblina oceánica en el perímetro
+scene.fog        = new THREE.FogExp2(0xd0eaf8, 0.010); // niebla atmosférica suave
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -485,6 +558,11 @@ const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerH
 camera.position.set(0, EYE, 0);
 rig.add(camera);
 scene.add(rig);
+
+// Linterna nocturna — se activa automáticamente al anochecer
+const nightLantern = new THREE.PointLight(0xffcc66, 0, 35);
+nightLantern.position.set(0, EYE * 0.8, 0);
+rig.add(nightLantern);
 
 // Lighting — bright, warm Wind Waker feel
 const ambientLight = new THREE.AmbientLight(0xd0eeff, 1.1);
@@ -604,7 +682,7 @@ function buildScene() {
     for (let x = 0; x < WORLD; x++)
       if (worldMap[z][x] === T.DWALL) dwalls.push([x, z]);
   if (dwalls.length) {
-    const WLAYERS = 5;                     // layers per wall tile
+    const WLAYERS = 7;                     // layers per wall tile (+40% altura)
     const ROCKS_PER_ROW = 3;               // rocks side-by-side per layer
     // Geo after reshape: XZ = 0.85*0.80 = 0.68 m, Y = 0.85*1.20 = 1.02 m
     const ROCK_XZ = 0.68, ROCK_Y = 1.02;
@@ -741,7 +819,7 @@ function buildScene() {
 
   // ── Trees — árboles low-poly proceduales por bioma ───────────
   const TREE_BASE = [1.2, 1.2, 1.2]; // tamaño mínimo
-  const TREE_VARY = [8.0, 7.0, 8.0]; // rango → 1.2 a 9.2 m (mezcla dramática grande/pequeño)
+  const TREE_VARY = [8.0, 7.0, 8.0]; // rango → 1.2 a 9.2 m
 
   treeLists.forEach((list, mi) => {
     const parts = treePartsList[mi];
@@ -1202,6 +1280,20 @@ function groundAt(wx, wz) {
        + vertexH(tx+1, tz+1) *    fx  *    fz;
 }
 
+// Detecta si el jugador está sobre una plataforma de escalera.
+// Solo activa el peldaño si el jugador ya alcanzó su nivel (≤0.3m por debajo),
+// evitando tanto teletransporte al entrar como caídas al aterrizar.
+function stepFloorAt(px, pz, py) {
+  let best = null;
+  for (const st of stairSteps) {
+    const dx = px - st.wx, dz = pz - st.wz;
+    if (dx * dx + dz * dz > st.r * st.r) continue;
+    if (py < st.topY - 0.3) continue; // ignorar peldaños aún por encima del jugador
+    if (best === null || st.topY > best) best = st.topY;
+  }
+  return best;
+}
+
 function move(dt) {
   let mx = 0, mz = 0;
   if (keys['KeyW']  || keys['ArrowUp'])    mz = -1;
@@ -1256,9 +1348,11 @@ function move(dt) {
     const prevX = rig.position.x, prevZ = rig.position.z;
     const maxW  = (WORLD - 1) * TILE;
 
-    // Swim at half speed in shallow water; sprint multiplier
-    const inWater = tileAt(rig.position.x, rig.position.z) === T.WATER;
-    const spd = (inWater ? SPEED * 0.5 : SPEED) * (isSprinting ? 1.6 : 1.0);
+    // Swim at half speed in shallow water; sprint multiplier; boost on PATH
+    const curMoveTile = tileAt(rig.position.x, rig.position.z);
+    const inWater  = curMoveTile === T.WATER;
+    const onPath   = curMoveTile === T.PATH;
+    const spd = (inWater ? SPEED * 0.5 : SPEED) * (isSprinting ? 1.6 : 1.0) * (onPath ? 1.25 : 1.0);
 
     rig.position.x = Math.max(1, Math.min(maxW, rig.position.x + _tmpV3.x * spd * dt));
     rig.position.z = Math.max(1, Math.min(maxW, rig.position.z + _tmpV3.z * spd * dt));
@@ -1279,6 +1373,46 @@ function move(dt) {
       }
     }
 
+    // Colisión muro circular de la aldea — cáscara cilíndrica con huecos de entrada
+    {
+      const _vwx = VILLAGE_CX * TILE + TILE * 0.5;
+      const _vwz = VILLAGE_CZ * TILE + TILE * 0.5;
+      const _wRm = VILLAGE_WALL_R * TILE * 0.8; // mismo factor que spawnVillage
+      const _vdx = rig.position.x - _vwx, _vdz = rig.position.z - _vwz;
+      const _vd  = Math.sqrt(_vdx * _vdx + _vdz * _vdz);
+      if (_vd > _wRm - 3.0 && _vd < _wRm + 3.0) {
+        const _va = Math.atan2(_vdz, _vdx);
+        const _atEnt = VILLAGE_ENT_ANGLES.some(ea => {
+          let d = Math.abs(_va - ea);
+          if (d > Math.PI) d = Math.PI * 2 - d;
+          return d < VILLAGE_ENT_HALF + 0.30;
+        });
+        if (!_atEnt) { rig.position.x = prevX; rig.position.z = prevZ; }
+      }
+    }
+
+    // Colisión muros de las torres del castillo — anillo sólido con hueco de puerta/ventana
+    for (const tw of castleTowerWalls) {
+      const tdx = rig.position.x - tw.cx, tdz = rig.position.z - tw.cz;
+      const dist = Math.sqrt(tdx * tdx + tdz * tdz);
+      if (dist < tw.innerR || dist > tw.outerR) continue;
+      const ang = Math.atan2(tdz, tdx);
+      const atGap = tw.gaps.some(g => {
+        let d = Math.abs(ang - g.angle);
+        if (d > Math.PI) d = Math.PI * 2 - d;
+        return d < g.half;
+      });
+      if (atGap) continue;
+      // Empujar hacia el lado más cercano del muro
+      if (dist < tw.midR) {
+        rig.position.x = tw.cx + (tdx / dist) * (tw.innerR - 0.1);
+        rig.position.z = tw.cz + (tdz / dist) * (tw.innerR - 0.1);
+      } else {
+        rig.position.x = tw.cx + (tdx / dist) * (tw.outerR + 0.1);
+        rig.position.z = tw.cz + (tdz / dist) * (tw.outerR + 0.1);
+      }
+    }
+
     // Footstep sound — tono varía según terreno (mejora #8)
     if (stepTimer === 0) {
       stepTimer = 0.42;
@@ -1291,9 +1425,62 @@ function move(dt) {
     }
   }
 
-  // Terrain following — smoothly match ground height
+  // ── Física de salto y gravedad ────────────────────────────────
   const targetY = groundAt(rig.position.x, rig.position.z);
-  rig.position.y += (targetY - rig.position.y) * Math.min(1, dt * 8);
+  const stairH  = stepFloorAt(rig.position.x, rig.position.z, rig.position.y);
+
+  // Coyote time: al salir del borde de un escalón, mantener el suelo 0.15s
+  if (stairH !== null) { lastStepY = stairH; coyoteTimer = 0.15; }
+  else coyoteTimer = Math.max(0, coyoteTimer - dt);
+  const effectiveStepH = stairH !== null ? stairH
+                       : (coyoteTimer > 0 && !jumpPressed && jumpVY <= 0) ? lastStepY
+                       : null;
+  const floorY = effectiveStepH !== null ? Math.max(targetY, effectiveStepH) : targetY;
+
+  if (onGround) {
+    rig.position.y += (floorY - rig.position.y) * Math.min(1, dt * 10);
+    // Salto — Space en desktop, botón A (buttons[4]) en VR
+    const wantsJump = keys['Space'] || (renderer.xr.isPresenting && _vrAWas);
+    if (wantsJump && !jumpPressed) {
+      jumpVY = JUMP_VY;
+      onGround = false;
+      jumpPressed = true;
+      sfx.jump();
+    }
+  } else {
+    jumpVY -= GRAVITY * dt;
+    rig.position.y += jumpVY * dt;
+    if (rig.position.y <= floorY) {
+      const heavyLand = jumpVY < -28;
+      rig.position.y = floorY;
+      jumpVY = 0;
+      onGround = true;
+      sfx.land();
+      _shakeT = 0.12;
+      if (heavyLand) { playerHP = Math.max(0, playerHP - 1); updateHPBar(); flashDamage(); }
+    }
+  }
+  if (!keys['Space']) jumpPressed = false;
+
+  // ── Indicador de bioma ────────────────────────────────────────
+  if (biomeEl) {
+    const BNAME = {
+      [T.WATER]: 'AGUA', [T.SAND]: 'DESIERTO', [T.GRASS]: 'PRADERA',
+      [T.FOREST]: 'BOSQUE', [T.MOUND]: 'MONTAÑA',
+      [T.DFLOOR]: 'CIUDADELA', [T.PATH]: 'CAMINO', [T.DEEP]: 'MAR PROFUNDO'
+    };
+    const curB = BNAME[tileAt(rig.position.x, rig.position.z)] || '';
+    if (curB && curB !== lastBiome) {
+      lastBiome = curB;
+      biomeEl.textContent = curB;
+      biomeEl.style.opacity = '1';
+      biomeHideTimer = 2.5;
+    }
+    if (biomeHideTimer > 0) {
+      biomeHideTimer -= dt;
+      if (biomeHideTimer <= 0) biomeEl.style.opacity = '0';
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1432,6 +1619,29 @@ const sfx = {
     g.gain.setValueAtTime(0.22, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
     o.connect(g); g.connect(ctx.destination);
     o.start(t); o.stop(t + 0.38);
+  },
+  jump() {
+    const ctx = getAudioCtx(), t = ctx.currentTime;
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(260, t);
+    o.frequency.exponentialRampToValueAtTime(480, t + 0.08);
+    g.gain.setValueAtTime(0.15, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+    o.connect(g); g.connect(ctx.destination);
+    o.start(t); o.stop(t + 0.18);
+  },
+  land() {
+    const ctx  = getAudioCtx(), t = ctx.currentTime;
+    const size = Math.floor(ctx.sampleRate * 0.07);
+    const buf  = ctx.createBuffer(1, size, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < size; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / size) * 0.7;
+    const src  = ctx.createBufferSource(); src.buffer = buf;
+    const filt = ctx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 220;
+    const gain = ctx.createGain(); gain.gain.setValueAtTime(0.55, t);
+    src.connect(filt); filt.connect(gain); gain.connect(ctx.destination);
+    src.start(t);
   },
 };
 
@@ -1731,8 +1941,8 @@ function updateEnemies(dt) {
         }
       }
     }
-    // Space key hit (desktop)
-    if ((keys['Space'] || mouseAttack) && dist < 2.5 && e.hitCooldown === 0) {
+    // Mouse click hit (desktop) — Space es para saltar
+    if (mouseAttack && dist < 2.5 && e.hitCooldown === 0) {
       e.hp--; e.hitCooldown = 0.5; sfx.hit();
       e.hitFlashT = 0.20; e.squashT = 0.12;
       if (e.hp <= 0) {
@@ -1889,7 +2099,7 @@ function updatePushRocks(dt) {
           hit = true;
         }
       }
-      if (!hit && (keys['Space'] || mouseAttack)) {
+      if (!hit && mouseAttack) {
         const dx = r.mesh.position.x - rig.position.x;
         const dz = r.mesh.position.z - rig.position.z;
         const d  = Math.sqrt(dx * dx + dz * dz) || 1;
@@ -2135,6 +2345,9 @@ function updateDayNight(dt) {
   const isNight = dayTime < 0.25 || dayTime > 0.75;
   if (moonObj) moonObj.visible = isNight;
   if (sfObj)   sfObj.visible   = isNight;
+
+  // Linterna nocturna — intensidad inversa a la luz del día
+  nightLantern.intensity = Math.max(0, 1.8 - brightness * 4.5);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2539,6 +2752,11 @@ function buildHUD() {
   dmgFlashEl.style.cssText = 'position:fixed;inset:0;background:#ff0000;opacity:0;pointer-events:none;z-index:100;transition:opacity 0.35s ease-out';
   document.body.appendChild(dmgFlashEl);
 
+  // Indicador de bioma — aparece al entrar a una zona nueva
+  biomeEl = document.createElement('div');
+  biomeEl.style.cssText = 'position:fixed;top:15%;left:50%;transform:translateX(-50%);font:bold 20px monospace;color:#fff;text-shadow:1px 1px 4px #000,0 0 8px #000;letter-spacing:3px;opacity:0;transition:opacity 0.6s;pointer-events:none;z-index:50';
+  document.body.appendChild(biomeEl);
+
   // NPC dialog
   npcDialogEl = document.createElement('div');
   npcDialogEl.style.cssText = [
@@ -2701,14 +2919,20 @@ renderer.setAnimationLoop(() => {
       hearts.splice(i, 1);
       playerHP = Math.min(5, playerHP + 1);
       updateHPBar();
-      sfx.heartPickup(); // mejora #16
+      sfx.heartPickup();
+      // Flash verde al curar
+      if (dmgFlashEl) {
+        dmgFlashEl.style.background = '#00ee44';
+        dmgFlashEl.style.opacity = '0.28';
+        setTimeout(() => { if (dmgFlashEl) { dmgFlashEl.style.opacity = '0'; setTimeout(() => { dmgFlashEl.style.background = '#ff0000'; }, 400); } }, 180);
+      }
     }
   }
 
   // ── Animación armas PC ────────────────────────────────────
   if (!renderer.xr.isPresenting && pcSword) {
-    // Swing al atacar (Space o clic izq)
-    if ((keys['Space'] || mouseAttack) && pcSwordSwingT <= 0) pcSwordSwingT = 0.22;
+    // Swing al atacar (solo clic izq — Space reservado para salto)
+    if (mouseAttack && pcSwordSwingT <= 0) pcSwordSwingT = 0.22;
     if (pcSwordSwingT > 0) {
       pcSwordSwingT = Math.max(0, pcSwordSwingT - dt);
       const t = 1 - pcSwordSwingT / 0.22; // 0 → 1
@@ -3152,18 +3376,265 @@ function _makeSignTex() {
   return new THREE.CanvasTexture(c);
 }
 
+
+// ─────────────────────────────────────────────────────────────
+// TECHO DE ROCA DEL CASTILLO
+// Losas planas sobre los tiles DFLOOR a la altura del tope de las paredes
+// ─────────────────────────────────────────────────────────────
+function spawnCastleRoof() {
+  // Mismas constantes que buildTiles() para coincidir con la altura real de los muros
+  const WLAYERS = 7;
+  const WSCALE  = TILE / (3 * 0.68);          // ≈ 5.88
+  const LAYER_H = 1.02 * WSCALE;              // ≈ 6.0 m por capa
+  const roofY   = (WLAYERS - 1) * LAYER_H;    // 1 capa abajo del tope — almenas visibles sobre el techo
+  const roofMat = new THREE.MeshLambertMaterial({ color: 0x3d2e1e, flatShading: true });
+  const FSCALE_XZ = (TILE * 0.97) / 0.68;    // igual que losas de suelo
+  const FSCALE_Y  = 0.6;                      // losa muy plana
+
+  const dfloors = [];
+  for (let z = 13; z < 21; z++)
+    for (let x = 23; x < 39; x++)
+      if (worldMap[z][x] === T.DFLOOR) dfloors.push([x, z]);
+
+  if (!dfloors.length) return;
+
+  const roofIM = new THREE.InstancedMesh(rockGeo, roofMat, dfloors.length);
+  roofIM.castShadow = roofIM.receiveShadow = true;
+  dfloors.forEach(([x, z], i) => {
+    const cx = x * TILE + TILE / 2, cz = z * TILE + TILE / 2;
+    const ry = (hash(x, z, worldSeed + 77) - 0.5) * 0.10;
+    dummy.position.set(cx, roofY, cz);
+    dummy.rotation.set(0, ry, 0);
+    dummy.scale.set(FSCALE_XZ, FSCALE_Y, FSCALE_XZ);
+    dummy.updateMatrix();
+    roofIM.setMatrixAt(i, dummy.matrix);
+  });
+  roofIM.instanceMatrix.needsUpdate = true;
+  scene.add(roofIM);
+}
+
+// ─────────────────────────────────────────────────────────────
+// ESCALERAS HELICOIDALES ALREDEDOR DE LAS TORRES
+// ─────────────────────────────────────────────────────────────
+function spawnSpiralStairs() {
+  // Plataformas discretas de salto dentro de las torres.
+  // Cada plataforma es un bloque ancho; el jugador debe SALTAR de una a otra.
+  const WALL_D   = TILE * 0.55;
+  const towerR   = TILE * 1.3;
+  const innerR   = towerR - WALL_D / 2;
+
+  const N_PLAT      = 64;               // número de plataformas (doble)
+  const N_TURNS     = 8;                // vueltas totales de la espiral
+  const STEP_H_RISE = 1.2;             // altura por escalón — 64×1.2=76.8m cabe en la torre
+  const PLAT_D      = 3.0;             // profundidad radial (m) — doble
+  const PLAT_R      = innerR - PLAT_D * 0.5; // borde exterior ras con el muro interior
+  const PLAT_W      = 7.6;             // ancho de la plataforma (m) — doble
+  const PLAT_T      = 0.9;             // grosor/alto del bloque (m)
+  const STEP_R      = 5.0;             // cubre la diagonal completa del peldaño (7.6×3.0m) + margen
+
+  const SX = PLAT_W / 0.68;
+  const SY = PLAT_T / 1.02;
+  const SZ = PLAT_D / 0.68;
+
+  const CASTLE_CX = 31 * TILE + TILE * 0.5;
+  const CASTLE_CZ = 17 * TILE + TILE * 0.5;
+
+  const positions = [
+    { tx: 17, tz: 24 },
+    { tx: 44, tz: 24 },
+  ];
+
+  const stairMat = new THREE.MeshLambertMaterial({ color: 0x7a6050, flatShading: true });
+  const stairIM  = new THREE.InstancedMesh(rockGeo, stairMat, positions.length * N_PLAT);
+  stairIM.castShadow = stairIM.receiveShadow = true;
+  const sd = new THREE.Object3D();
+  let si = 0;
+
+  positions.forEach(({ tx, tz }) => {
+    const wx = tx * TILE + TILE * 0.5;
+    const wz = tz * TILE + TILE * 0.5;
+    const bh = groundAt(wx, wz);
+    // Empezar 120° después de la puerta para que el primer escalón sea accesible desde dentro
+    const doorAngle  = Math.atan2(CASTLE_CZ - wz, CASTLE_CX - wx);
+    const startAngle = doorAngle + Math.PI * 0.67;
+
+    for (let s = 0; s < N_PLAT; s++) {
+      const frac  = s / (N_PLAT - 1);
+      const angle = startAngle + frac * Math.PI * 2 * N_TURNS;
+      const platY = bh + (s + 1) * STEP_H_RISE; // primer peldaño a STEP_H_RISE del suelo
+      const platX = wx + Math.cos(angle) * PLAT_R;
+      const platZ = wz + Math.sin(angle) * PLAT_R;
+
+      sd.position.set(platX, platY - PLAT_T * 0.5, platZ);
+      sd.rotation.set(0, -(Math.PI / 2 + angle), 0);
+      sd.scale.set(SX, SY, SZ);
+      sd.updateMatrix();
+      stairIM.setMatrixAt(si++, sd.matrix);
+
+      // Colisión: el jugador aterriza aquí si está dentro del radio y cerca de la altura
+      stairSteps.push({ wx: platX, wz: platZ, topY: platY, r: STEP_R });
+    }
+  });
+
+  stairIM.instanceMatrix.needsUpdate = true;
+  scene.add(stairIM);
+}
+
+function spawnCastleTowers() {
+  const TOW_LAYERS = 12;
+  const ROCKS_RING = 24;                         // más bloques → sin huecos visibles
+  const towerR  = TILE * 1.3;
+  const WALL_D  = TILE * 0.55;
+  const BLOCK_H = TILE * 0.52;
+  const segAngle = (2 * Math.PI) / ROCKS_RING;
+  const innerR  = towerR - WALL_D / 2;
+  const outerR  = towerR + WALL_D / 2;
+  const roofMat = new THREE.MeshLambertMaterial({ color: 0x2a4020, flatShading: true });
+  const merMat  = new THREE.MeshLambertMaterial({ color: 0x5a3828, flatShading: true });
+
+  // SX basado en arco exterior para que los bloques se toquen sin huecos por fuera
+  const arcW = outerR * segAngle;
+  const SX = arcW    / 0.68;
+  const SY = BLOCK_H / 1.02;
+  const SZ = WALL_D  / 0.68;
+
+  // Torres alejadas del cuerpo principal del castillo
+  const CASTLE_CX = 31 * TILE + TILE * 0.5;
+  const CASTLE_CZ = 17 * TILE + TILE * 0.5;
+  const positions = [
+    { tx: 17, tz: 24 }, // SW — fuera del foso
+    { tx: 44, tz: 24 }, // SE — fuera del foso
+  ];
+
+  // Puerta: bloques eliminados en los primeros pisos (×2 respecto a ROCKS_RING=12)
+  const DOOR_SEGS   = 4;   // mantiene mismo ángulo de apertura que antes
+  const DOOR_LAYERS = 3;
+  // Ventana mirando al castillo en los últimos pisos (sobre el techo del castillo)
+  const WIN_LAYERS_START = 10;
+  const WIN_LAYERS_END   = 12;
+  const WIN_SEGS    = 4;
+  // Ángulo de semiapertura para colisión (rad)
+  const DOOR_HALF_ANG = segAngle * (DOOR_SEGS / 2 + 0.3);
+
+  const bodyInst = positions.length * TOW_LAYERS * ROCKS_RING;
+  const merlInst = positions.length * ROCKS_RING;
+  const bIM = new THREE.InstancedMesh(rockGeo, rockMat, bodyInst);
+  const mIM = new THREE.InstancedMesh(rockGeo, merMat, merlInst);
+  bIM.castShadow = bIM.receiveShadow = true;
+  mIM.castShadow = mIM.receiveShadow = true;
+  const td = new THREE.Object3D();
+  let bIdx = 0, mIdx = 0;
+
+  positions.forEach(({ tx, tz }) => {
+    const wx = tx * TILE + TILE * 0.5;
+    const wz = tz * TILE + TILE * 0.5;
+    const bh = groundAt(wx, wz);
+    const towerTop = bh + BLOCK_H * TOW_LAYERS;
+
+    // Ángulo de la puerta apuntando hacia el castillo
+    const doorAngle = Math.atan2(CASTLE_CZ - wz, CASTLE_CX - wx);
+
+    for (let ly = 0; ly < TOW_LAYERS; ly++) {
+      const stagger = (ly & 1) ? segAngle * 0.5 : 0;
+      for (let ri = 0; ri < ROCKS_RING; ri++) {
+        const a = ri * segAngle + stagger;
+
+        // Hueco de puerta: los DOOR_SEGS bloques más cercanos al doorAngle
+        // se eliminan en los DOOR_LAYERS primeros pisos
+        if (ly < DOOR_LAYERS) {
+          let diff = Math.abs(a - doorAngle);
+          if (diff > Math.PI) diff = Math.PI * 2 - diff;
+          if (diff < segAngle * (DOOR_SEGS / 2 + 0.3)) {
+            td.scale.setScalar(0); td.updateMatrix();
+            bIM.setMatrixAt(bIdx++, td.matrix);
+            continue;
+          }
+        }
+
+        // Ventana superior mirando al castillo — misma dirección que la puerta
+        if (ly >= WIN_LAYERS_START && ly < WIN_LAYERS_END) {
+          const windowAngle = doorAngle;
+          let diff = Math.abs(a - windowAngle);
+          if (diff > Math.PI) diff = Math.PI * 2 - diff;
+          if (diff < segAngle * (WIN_SEGS / 2 + 0.3)) {
+            td.scale.setScalar(0); td.updateMatrix();
+            bIM.setMatrixAt(bIdx++, td.matrix);
+            continue;
+          }
+        }
+
+        td.position.set(
+          wx + Math.cos(a) * towerR,
+          bh + BLOCK_H * (ly + 0.5),
+          wz + Math.sin(a) * towerR
+        );
+        td.rotation.set(0, -(Math.PI / 2 + a), 0);
+        td.scale.set(SX, SY, SZ);
+        td.updateMatrix();
+        bIM.setMatrixAt(bIdx++, td.matrix);
+      }
+    }
+
+    // Almenas
+    const merSY = (BLOCK_H * 1.5) / 1.02;
+    for (let ri = 0; ri < ROCKS_RING; ri++) {
+      if (ri % 2 !== 0) {
+        td.scale.setScalar(0); td.updateMatrix();
+        mIM.setMatrixAt(mIdx++, td.matrix);
+        continue;
+      }
+      const a = ri * segAngle;
+      td.position.set(
+        wx + Math.cos(a) * towerR,
+        towerTop + BLOCK_H * 1.5 * 0.5,
+        wz + Math.sin(a) * towerR
+      );
+      td.rotation.set(0, -(Math.PI / 2 + a), 0);
+      td.scale.set(SX, merSY, SZ);
+      td.updateMatrix();
+      mIM.setMatrixAt(mIdx++, td.matrix);
+    }
+
+    // Registrar colisión: un solo gap en doorAngle sirve para puerta y ventana superior
+    castleTowerWalls.push({
+      cx: wx, cz: wz,
+      innerR, outerR, midR: towerR,
+      gaps: [
+        { angle: doorAngle, half: DOOR_HALF_ANG },
+      ],
+    });
+
+    // Techo cónico
+    const cone = new THREE.Mesh(
+      new THREE.ConeGeometry(outerR * 1.05, BLOCK_H * 7, 10),
+      roofMat
+    );
+    cone.position.set(wx, towerTop + BLOCK_H * 3.5, wz);
+    cone.castShadow = true;
+    scene.add(cone);
+  });
+
+  bIM.instanceMatrix.needsUpdate = true;
+  mIM.instanceMatrix.needsUpdate = true;
+  scene.add(bIM);
+  scene.add(mIM);
+}
+
 function spawnVillage() {
   const VCX = VILLAGE_CX * TILE + TILE / 2; // centro mundo X
   const VCZ = VILLAGE_CZ * TILE + TILE / 2; // centro mundo Z
-  const wallWorldR = VILLAGE_WALL_R * TILE;  // radio del muro en metros
+  const wallWorldR = VILLAGE_WALL_R * TILE * 0.8; // radio del muro (−20%)
 
-  // ── Muro circular con rockGeo (InstancedMesh) ────────────────
-  // rockGeo: 0.68×1.02×0.68 m → escalar a 1 TILE × 2.5m × 1m
-  const SX = TILE / 0.68;  // ~4.41 — ancho tangencial = 1 tile
-  const SY = 2.5  / 1.02;  // ~2.45 — alto = 2.5m
-  const SZ = 1.0  / 0.68;  // ~1.47 — fondo radial = 1m
+  // ── Muro circular — 3 capas apiladas, sin huecos ─────────────
+  // Cada bloque: 2.5m ancho × 1.8m alto × 1.8m fondo
+  const WALL_W = 2.5, LAYER_H = 1.8, WALL_D = 1.8;
+  const WALL_LAYERS = 3;
+  const SX = WALL_W / 0.68;
+  const SY = LAYER_H / 1.02;
+  const SZ = WALL_D / 0.68;
 
-  const N_SEGS = 56;
+  // N_SEGS: cubrir el perímetro exactamente (leve solapado del 5%)
+  const N_SEGS = Math.ceil((2 * Math.PI * wallWorldR) / (WALL_W * 0.95));
   const wallAngles = [];
   for (let i = 0; i < N_SEGS; i++) {
     const angle = (i / N_SEGS) * Math.PI * 2;
@@ -3175,17 +3646,23 @@ function spawnVillage() {
     if (!nearEnt) wallAngles.push(angle);
   }
 
-  const wIM = new THREE.InstancedMesh(rockGeo, rockMat, wallAngles.length);
+  const totalWallInst = wallAngles.length * WALL_LAYERS;
+  const wIM = new THREE.InstancedMesh(rockGeo, rockMat, totalWallInst);
   wIM.castShadow = wIM.receiveShadow = true;
   const wd = new THREE.Object3D();
-  wallAngles.forEach((angle, i) => {
+  let wIdx = 0;
+  wallAngles.forEach(angle => {
     const wx = VCX + wallWorldR * Math.cos(angle);
     const wz = VCZ + wallWorldR * Math.sin(angle);
-    wd.position.set(wx, groundAt(wx, wz) + 1.25, wz);
-    wd.rotation.set(0, Math.PI / 2 + angle, 0); // tangencial al círculo
-    wd.scale.set(SX, SY, SZ);
-    wd.updateMatrix();
-    wIM.setMatrixAt(i, wd.matrix);
+    const baseH = groundAt(wx, wz);
+    for (let ly = 0; ly < WALL_LAYERS; ly++) {
+      wd.position.set(wx, baseH + LAYER_H * (ly + 0.5), wz);
+      // Rotación correcta: eje local X apunta en dirección tangente (-sin a, 0, cos a)
+      wd.rotation.set(0, -(Math.PI / 2 + angle), 0);
+      wd.scale.set(SX, SY, SZ);
+      wd.updateMatrix();
+      wIM.setMatrixAt(wIdx++, wd.matrix);
+    }
   });
   wIM.instanceMatrix.needsUpdate = true;
   scene.add(wIM);
@@ -3362,13 +3839,14 @@ function updateNPCs(dt) {
     ff.mesh.visible = isNight;
   }
 
-  // Player shadow update (mejora #2)
+  // Player shadow update — se achica al saltar, siempre en el suelo
   if (playerShadow) {
-    playerShadow.position.set(
-      rig.position.x,
-      groundAt(rig.position.x, rig.position.z) + 0.02,
-      rig.position.z
-    );
+    const groundY = groundAt(rig.position.x, rig.position.z);
+    const airH    = Math.max(0, rig.position.y - groundY);
+    const sScale  = Math.max(0.15, 1 - airH * 0.025);
+    playerShadow.position.set(rig.position.x, groundY + 0.02, rig.position.z);
+    playerShadow.scale.setScalar(sScale);
+    playerShadow.material.opacity = sScale * 0.3;
   }
 }
 
@@ -3385,6 +3863,9 @@ function initGame() {
   spawnDragons();
   spawnNPCs();
   spawnVillage();
+  spawnCastleTowers();
+  spawnCastleRoof();
+  spawnSpiralStairs();
   buildMinimap();
   buildHUD();
   updateStarCounter();
@@ -3430,6 +3911,8 @@ function _makeRockTex() {
   }
   return new THREE.CanvasTexture(cv);
 }
+
+
 
 // Geometría cúbica con esquinas jittered — sin grietas (misma esquina → mismo jitter)
 function _makeRockGeo(seed) {
