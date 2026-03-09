@@ -1385,6 +1385,8 @@ function move(dt) {
     camera.position.y = EYE + bobAmt;
   }
 
+  let wdx = 0, wdz = 0; // desplazamiento horizontal deseado (se pasa a Rapier abajo)
+
   if (isMoving) {
     let hy = yaw;
     if (renderer.xr.isPresenting) {
@@ -1396,35 +1398,14 @@ function move(dt) {
     // Reutilizar _tmpV3 — sin new Three.Vector3 por frame
     _tmpV3.set(mx, 0, mz).normalize().applyEuler(_tmpE.set(0, hy, 0));
 
-    const maxW  = (WORLD - 1) * TILE;
-
     // Swim at half speed in shallow water; sprint multiplier; boost on PATH
     const curMoveTile = tileAt(rig.position.x, rig.position.z);
     const inWater  = curMoveTile === T.WATER;
     const onPath   = curMoveTile === T.PATH;
     const spd = (inWater ? SPEED * 0.5 : SPEED) * (isSprinting ? 1.6 : 1.0) * (onPath ? 1.25 : 1.0);
 
-    const dx = _tmpV3.x * spd * dt;
-    const dz = _tmpV3.z * spd * dt;
-
-    // Pasar movimiento horizontal a Rapier
-    if (rapierWorld && playerBody) {
-      charCtrl.computeColliderMovement(
-        playerCollider,
-        { x: dx, y: 0, z: dz },
-        true, null, (col) => col !== playerCollider
-      );
-      const cm = charCtrl.computedMovement();
-      const pos = playerBody.translation();
-      const nx = Math.max(1, Math.min(maxW, pos.x + cm.x));
-      const nz = Math.max(1, Math.min(maxW, pos.z + cm.z));
-      playerBody.setNextKinematicTranslation({ x: nx, y: pos.y, z: nz });
-      rig.position.x = nx;
-      rig.position.z = nz;
-    } else {
-      rig.position.x = Math.max(1, Math.min(maxW, rig.position.x + dx));
-      rig.position.z = Math.max(1, Math.min(maxW, rig.position.z + dz));
-    }
+    wdx = _tmpV3.x * spd * dt;
+    wdz = _tmpV3.z * spd * dt;
 
     // Footstep sound — tono varía según terreno (mejora #8)
     if (stepTimer === 0) {
@@ -1438,22 +1419,27 @@ function move(dt) {
     }
   }
 
-  // ── Física de salto y gravedad (Rapier) ──────────────────────
+  // ── Física (Rapier) — movimiento XZ + Y en una sola llamada ──
   if (rapierWorld && playerBody) {
     const wantsJump = keys['Space'] || (renderer.xr.isPresenting && _vrAWas);
     if (onGround && wantsJump && !jumpPressed) {
       jumpVY = JUMP_VY; onGround = false; jumpPressed = true; sfx.jump();
     }
     if (!onGround) jumpVY -= GRAVITY * dt;
+    // Cuando está en suelo, fuerza pequeña hacia abajo para que computedGrounded() funcione
+    const yMov = onGround ? -0.5 : jumpVY * dt;
 
+    const maxW = (WORLD - 1) * TILE;
     charCtrl.computeColliderMovement(
       playerCollider,
-      { x: 0, y: jumpVY * dt, z: 0 },  // horizontal ya aplicado arriba; aquí solo vertical
+      { x: wdx, y: yMov, z: wdz },
       true, null, (col) => col !== playerCollider
     );
-    const cm = charCtrl.computedMovement();
+    const cm  = charCtrl.computedMovement();
     const pos = playerBody.translation();
-    playerBody.setNextKinematicTranslation({ x: pos.x, y: pos.y + cm.y, z: pos.z });
+    const nx  = Math.max(1, Math.min(maxW, pos.x + cm.x));
+    const nz  = Math.max(1, Math.min(maxW, pos.z + cm.z));
+    playerBody.setNextKinematicTranslation({ x: nx, y: pos.y + cm.y, z: nz });
 
     const wasInAir = !onGround;
     onGround = charCtrl.computedGrounded();
@@ -1465,8 +1451,9 @@ function move(dt) {
     if (!keys['Space']) jumpPressed = false;
 
     // Sincronizar rig con el cuerpo físico
-    const p = playerBody.translation();
-    rig.position.y = p.y - CAPS_OFFSET;
+    rig.position.x = nx;
+    rig.position.z = nz;
+    rig.position.y = pos.y + cm.y - CAPS_OFFSET;
   }
 
   // ── Indicador de bioma ────────────────────────────────────────
