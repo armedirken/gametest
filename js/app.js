@@ -163,7 +163,7 @@ const rockMat = new THREE.MeshLambertMaterial({ map: _makeRockTex(), flatShading
 // ── Contadores y estado global ────────────────────────────────
 let coinsCollected = 0;    // monedas recogidas (evita filter() por frame)
 let enemiesKilled  = 0;    // para pantalla de victoria
-let _waterFrame    = 0;    // throttle de animación de agua
+
 let coinIM         = null; // InstancedMesh de monedas (30 → 1 draw call)
 let bossCoin       = null; // Moneda grande del boss (vale 5, Mesh propio)
 let dmgFlashEl     = null; // div de flash rojo al recibir daño
@@ -641,19 +641,80 @@ function buildScene() {
   terrainMesh.receiveShadow = true;
   scene.add(terrainMesh);
 
-  // ── Water surface (animated wave mesh) ──────────────────────
-  waterMesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(WORLD * TILE, WORLD * TILE, 32, 32),
-    new THREE.MeshLambertMaterial({ color: COLOR.WATER, transparent: true, opacity: 0.78 })
-  );
-  waterMesh.rotation.x = -Math.PI / 2;
-  waterMesh.position.set(WORLD * TILE / 2, -0.10, WORLD * TILE / 2);
-  scene.add(waterMesh);
-  // Save base XY (geo-space) for per-vertex wave displacement
-  { const wp = waterMesh.geometry.attributes.position;
-    wBaseX = new Float32Array(wp.count);
-    wBaseY = new Float32Array(wp.count);
-    for (let i = 0; i < wp.count; i++) { wBaseX[i] = wp.getX(i); wBaseY[i] = wp.getY(i); } }
+  // ── Water surface — shader realista con Fresnel + specular + shimmer ──
+  {
+    const _wVert = `
+      uniform float uTime;
+      varying vec3 vWorldPos;
+      varying vec3 vWorldNormal;
+      void main() {
+        vec3 pos = position;
+        // 4 capas de ondas superpuestas
+        float w1 = sin(pos.x * 0.12 + uTime * 1.50) * 0.18;
+        float w2 = cos(pos.y * 0.09 + uTime * 1.10) * 0.13;
+        float w3 = sin((pos.x + pos.y) * 0.06 + uTime * 0.80) * 0.09;
+        float w4 = cos((pos.x - pos.y) * 0.05 + uTime * 1.30) * 0.06;
+        pos.z += w1 + w2 + w3 + w4;
+        // Derivadas parciales para la normal
+        float dx = cos(pos.x * 0.12 + uTime * 1.50) * 0.12 * 0.18
+                 + cos((pos.x + pos.y) * 0.06 + uTime * 0.80) * 0.06 * 0.09
+                 - sin((pos.x - pos.y) * 0.05 + uTime * 1.30) * 0.05 * 0.06;
+        float dy = -sin(pos.y * 0.09 + uTime * 1.10) * 0.09 * 0.13
+                 + cos((pos.x + pos.y) * 0.06 + uTime * 0.80) * 0.06 * 0.09
+                 + sin((pos.x - pos.y) * 0.05 + uTime * 1.30) * 0.05 * 0.06;
+        vec3 localNormal = normalize(vec3(-dx, -dy, 1.0));
+        vWorldNormal = normalize(mat3(modelMatrix) * localNormal);
+        vec4 worldPos = modelMatrix * vec4(pos, 1.0);
+        vWorldPos = worldPos.xyz;
+        gl_Position = projectionMatrix * viewMatrix * worldPos;
+      }`;
+    const _wFrag = `
+      uniform float uTime;
+      uniform vec3  uSunDir;
+      uniform float uFogDensity;
+      uniform vec3  uFogColor;
+      varying vec3 vWorldPos;
+      varying vec3 vWorldNormal;
+      void main() {
+        vec3 viewDir = normalize(cameraPosition - vWorldPos);
+        float NdotV  = max(dot(vWorldNormal, viewDir), 0.0);
+        float fresnel = pow(1.0 - NdotV, 2.5);
+        // Color profundidad
+        vec3 deep    = vec3(0.04, 0.14, 0.40);
+        vec3 shallow = vec3(0.10, 0.54, 0.72);
+        vec3 col     = mix(deep, shallow, fresnel * 0.55 + 0.10);
+        // Specular solar (Blinn-Phong)
+        vec3 halfV = normalize(uSunDir + viewDir);
+        float spec = pow(max(dot(vWorldNormal, halfV), 0.0), 90.0);
+        col += vec3(1.0, 0.97, 0.88) * spec * 0.85;
+        // Shimmer animado tipo cáusticas
+        float s1 = sin(vWorldPos.x*0.30 + uTime*2.2) * sin(vWorldPos.z*0.30 + uTime*1.8);
+        float s2 = sin(vWorldPos.x*0.18 + uTime*1.5 + 0.9) * sin(vWorldPos.z*0.22 + uTime*2.0);
+        col += vec3(0.3, 0.55, 0.85) * clamp(s1*0.5 + s2*0.3 + 0.5, 0.0, 1.0) * 0.06;
+        // Opacidad Fresnel
+        float alpha = mix(0.68, 0.92, fresnel);
+        // Niebla exponencial
+        float fogF = 1.0 - exp(-uFogDensity * length(vWorldPos - cameraPosition));
+        gl_FragColor = vec4(mix(col, uFogColor, fogF), alpha);
+      }`;
+    waterMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(8000, 8000, 80, 80),
+      new THREE.ShaderMaterial({
+        uniforms: {
+          uTime:       { value: 0 },
+          uSunDir:     { value: new THREE.Vector3(0.6, 0.8, 0.3).normalize() },
+          uFogDensity: { value: 0.007 },
+          uFogColor:   { value: new THREE.Color(0x9ec8e8) },
+        },
+        vertexShader:   _wVert,
+        fragmentShader: _wFrag,
+        transparent: true,
+      })
+    );
+    waterMesh.rotation.x = -Math.PI / 2;
+    waterMesh.position.set(0, -0.08, 0);
+    scene.add(waterMesh);
+  }
 
   // Foam eliminado — causaba cuadrados grises cerca de la costa
 
@@ -2401,6 +2462,9 @@ function updateDayNight(dt) {
     40
   );
 
+  // Dirección solar para el shader del agua
+  if (waterMesh) waterMesh.material.uniforms.uSunDir.value.copy(sun.position).normalize();
+
   // Sun color: warm white at day, orange-red at dusk/dawn
   const duskAmount = 1 - Math.min(1, brightness * 3);
   _sunColor.setHex(0xfff2cc).lerp(new THREE.Color(0xff6600), duskAmount * 0.6);
@@ -2428,7 +2492,7 @@ let rainMesh = null;
 let rainTimer = 30 + Math.random() * 60; // first rain in 30-90s
 
 // Water animation refs (set in buildScene)
-let waterMesh = null, wBaseX = null, wBaseY = null;
+let waterMesh = null;
 
 const RAIN_COUNT = 1800;
 const rainPositions = new Float32Array(RAIN_COUNT * 3);
@@ -2462,17 +2526,14 @@ function stopRain() {
 }
 
 function updateWater(t) {
-  if (!waterMesh || !wBaseX) return;
-  const pos = waterMesh.geometry.attributes.position;
-  for (let i = 0; i < pos.count; i++) {
-    // geo-space Z = world Y (height) after rotation.x = -PI/2
-    pos.setZ(i,
-      Math.sin(wBaseX[i] * 0.18 + t * 1.6) * 0.12 +
-      Math.cos(wBaseY[i] * 0.15 + t * 1.2) * 0.09
-    );
-  }
-  pos.needsUpdate = true;
-  waterMesh.geometry.computeVertexNormals();
+  if (!waterMesh) return;
+  const u = waterMesh.material.uniforms;
+  u.uTime.value = t;
+  // Centrar en el jugador para cubrir siempre el área visible
+  waterMesh.position.x = rig.position.x;
+  waterMesh.position.z = rig.position.z;
+  // Sincronizar color de niebla con el cielo
+  if (scene.fog) u.uFogColor.value.copy(scene.fog.color);
 }
 
 function updateRain(dt) {
@@ -2959,7 +3020,7 @@ renderer.setAnimationLoop(() => {
     updateCameraShake(dt);
   }
   // Agua: cada 3 frames en desktop, omitir en VR
-  if (!renderer.xr.isPresenting && (++_waterFrame % 3 === 0)) updateWater(elapsed);
+  updateWater(elapsed); // solo actualiza uniforms — sin coste CPU
   // Minimapa: en VR actualizar cada 6 frames, en desktop cada frame
   if (!renderer.xr.isPresenting || Math.round(elapsed * 10) % 6 === 0) drawMinimap();
 
