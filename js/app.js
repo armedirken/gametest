@@ -4326,68 +4326,147 @@ function spawnCastleTowers() {
 // SISTEMA DE CHUNKS — MUNDO INFINITO PROCEDURAL
 // ─────────────────────────────────────────────────────────────
 
-// ── Altura global continua (coordenadas de tile globales) ─────────────────
-// Usa SOLO coordenadas globales → idéntica en todo chunk → sin costuras
-function _globalH(gx, gz) {
-  // Escala grande: define zonas de montaña / llanura / desierto
-  const nC = fbm(gx / 55, gz / 55, 4, worldSeed + 111); // 0-1 formas continentales
-  // Escala media: colinas y valles
-  const nM = fbm(gx / 18, gz / 18, 4, worldSeed + 222); // 0-1
-  // Escala fina: detalle local
-  const nF = fbm(gx / 7,  gz / 7,  3, worldSeed + 333); // 0-1
+// ── Sistema de biomas por temperatura + humedad (estilo Whittaker) ────────
+// 24 biomas distintos — coordenadas globales → sin costuras entre chunks
+//
+// Biomas fríos  (temp < 0.22): Tundra, Taiga
+// Biomas templados (0.22-0.42): Estepa, Llanura, Bosque templado, Pantano
+// Biomas cálidos  (0.42-0.62): Sabana, Pradera, Bosque mixto, Selva, Manglar
+// Biomas tropicales (0.62-0.82): Desierto, Sahel, Sabana tropical, Selva tropical, Humedal
+// Biomas áridos calientes (>0.82): Gran desierto, Badlands, Sabana árida, Selva densa, Archipiélago
+// Biomas de montaña (por elevación): Tierras altas, Montañas, Alpino/Volcánico
 
-  // Máscara de montañas — transición suave
-  const mW = Math.max(0, Math.min(1, (nC - 0.50) / 0.22));
-  // Máscara de desierto (excluye zonas de montaña)
-  const dN = fbm(gx / 70, gz / 70, 2, worldSeed + 444);
-  const dW = Math.max(0, Math.min(1, (dN - 0.62) / 0.20)) * (1 - mW);
-
-  const hFlat = nM * 13 + nF * 5;          // llanura ondulada  0–18 m
-  const hDune = 1  + nM * 11 + nF * 6;     // dunas              1–18 m
-  const hMtn  = 12 + nC * 72 + nM * 30;    // montañas          12–114 m
-
-  return hFlat * (1 - mW - dW) + hDune * dW + hMtn * mW;
-}
-
-// ── Tipo de tile a partir de coordenadas globales y altura ────────────────
-function _globalTile(gx, gz, h) {
-  const nF    = fbm(gx / 7,  gz / 7,  3, worldSeed + 333);
-  const dN    = fbm(gx / 70, gz / 70, 2, worldSeed + 444);
-  const dW    = Math.max(0, Math.min(1, (dN - 0.62) / 0.20));
-  const swN   = fbm(gx / 45, gz / 45, 2, worldSeed + 555);
-  const swW   = Math.max(0, Math.min(1, (swN - 0.66) / 0.16));
-  const frstN = fbm(gx / 22, gz / 22, 2, worldSeed + 666);
-
-  // Lagos: cuencas bajas con ruido de baja frecuencia
-  const lakeN = fbm(gx / 32, gz / 32, 2, worldSeed + 888);
-  if (lakeN < 0.22 && h < 13 && dW < 0.2) return T.WATER;
-
-  // Ríos: bandas estrechas serpenteantes en tierra baja
-  const riverN = fbm(gx / 30, gz / 30, 3, worldSeed + 777);
-  if (Math.abs(riverN - 0.50) < 0.020 && h < 20 && dW < 0.15) return T.WATER;
-
-  if (h < 0.4 || nF < 0.055) return T.WATER;
-  if (h > 30)  return T.MOUND;
-  if (dW > 0.35)              return T.SAND;
-  if (swW > 0.4 && h < 9)    return T.FOREST; // ciénaga
-  if (frstN > 0.52)           return T.FOREST;
-  return T.GRASS;
-}
-
-// ── Etiqueta de bioma por chunk (solo para densidad de árboles) ───────────
 function _chunkBiome(cx, cz) {
   if (cx === 0 && cz === 0) return 'home';
-  const gx = cx * WORLD + WORLD / 2, gz = cz * WORLD + WORLD / 2;
-  const nC = fbm(gx / 55, gz / 55, 4, worldSeed + 111);
-  const mW = Math.max(0, Math.min(1, (nC - 0.50) / 0.22));
-  if (mW > 0.4) return 'mountains';
-  const dN = fbm(gx / 70, gz / 70, 2, worldSeed + 444);
-  if (dN > 0.62) return 'desert';
-  const swN = fbm(gx / 45, gz / 45, 2, worldSeed + 555);
-  if (swN > 0.66) return 'swamp';
-  const frstN = fbm(gx / 22, gz / 22, 2, worldSeed + 666);
-  if (frstN > 0.58) return 'forest';
-  return 'plains';
+  const gx = cx*WORLD+WORLD/2, gz = cz*WORLD+WORLD/2;
+  const elev  = fbm(gx/55, gz/55, 3, worldSeed+111);
+  const mW    = Math.max(0, Math.min(1, (elev-0.52)/0.22));
+  if (mW > 0.60) return 'alpine';
+  if (mW > 0.35) return 'mountains';
+  if (mW > 0.15) return 'highlands';
+  const temp  = fbm(gx/80, gz/80, 2, worldSeed+1001);
+  const humid = fbm(gx/80, gz/80, 2, worldSeed+2002);
+  if (temp < 0.22) return humid < 0.45 ? 'tundra' : 'taiga';
+  if (temp < 0.42) {
+    if (humid < 0.22) return 'steppe';
+    if (humid < 0.50) return 'plains';
+    if (humid < 0.75) return 'tempforest';
+    return 'coldswamp';
+  }
+  if (temp < 0.62) {
+    if (humid < 0.22) return 'drysavanna';
+    if (humid < 0.48) return 'prairie';
+    if (humid < 0.70) return 'mixedforest';
+    if (humid < 0.85) return 'jungle';
+    return 'mangrove';
+  }
+  if (temp < 0.82) {
+    if (humid < 0.22) return 'desert';
+    if (humid < 0.40) return 'sahel';
+    if (humid < 0.60) return 'tropicalsavanna';
+    if (humid < 0.80) return 'tropicalforest';
+    return 'tropicalwetland';
+  }
+  if (humid < 0.18) return 'hotdesert';
+  if (humid < 0.35) return 'badlands';
+  if (humid < 0.55) return 'aridsavanna';
+  if (humid < 0.75) return 'rainforest';
+  return 'archipelago';
+}
+
+function generateChunkData(cx, cz) {
+  const biome = _chunkBiome(cx, cz);
+  const map  = Array.from({length:WORLD}, ()=>new Array(WORLD).fill(T.GRASS));
+  const hmap = Array.from({length:WORLD}, ()=>new Array(WORLD).fill(0));
+
+  for (let z=0;z<WORLD;z++) for (let x=0;x<WORLD;x++) {
+    const gx=cx*WORLD+x, gz=cz*WORLD+z;
+    // Calcular ruido una sola vez por tile
+    const elev  = fbm(gx/55,  gz/55,  3, worldSeed+111);
+    const rough = fbm(gx/20,  gz/20,  4, worldSeed+222);
+    const fine  = fbm(gx/7,   gz/7,   3, worldSeed+333);
+    const temp  = fbm(gx/80,  gz/80,  2, worldSeed+1001);
+    const humid = fbm(gx/80,  gz/80,  2, worldSeed+2002);
+    const mW    = Math.max(0, Math.min(1, (elev-0.52)/0.22));
+
+    // ── Altura según bioma ──────────────────────────────────────────────
+    let h;
+    if (mW > 0.60) {                                         // Alpino / Volcánico
+      const vN = fbm(gx/12, gz/12, 5, worldSeed+4004);
+      h = 20 + elev*88 + vN*28;
+    } else if (mW > 0.35) {                                  // Montañas
+      h = 14 + elev*72 + rough*18;
+    } else if (mW > 0.15) {                                  // Tierras altas
+      h = 8 + elev*34 + rough*12;
+    } else if (temp < 0.22) {
+      h = humid<0.45 ? rough*6+fine*2                        // Tundra — muy plana
+                     : 4+rough*20+fine*5;                    // Taiga
+    } else if (temp < 0.42) {
+      if (humid<0.22) h = 2+rough*12+fine*4;                 // Estepa
+      else if (humid<0.50) h = rough*16+fine*5;              // Llanura fría
+      else if (humid<0.75) h = 4+rough*24+fine*7;            // Bosque templado
+      else h = rough*3+fine*1.5;                             // Pantano frío
+    } else if (temp < 0.62) {
+      if (humid<0.22) h = 2+rough*13+fine*5;                 // Sabana seca
+      else if (humid<0.48) h = rough*18+fine*6;              // Pradera
+      else if (humid<0.70) h = 6+rough*28+fine*8;            // Bosque mixto
+      else if (humid<0.85) h = 12+rough*36+fine*10;          // Selva templada
+      else h = rough*4+fine*2;                               // Manglar
+    } else if (temp < 0.82) {
+      if (humid<0.22) h = 5+rough*20+fine*8;                 // Desierto (dunas medianas)
+      else if (humid<0.40) h = 2+rough*14+fine*5;            // Sahel
+      else if (humid<0.60) h = rough*14+fine*5;              // Sabana tropical
+      else if (humid<0.80) h = 14+rough*38+fine*11;          // Selva tropical
+      else h = rough*5+fine*2;                               // Humedal tropical
+    } else {
+      if (humid<0.18) h = 6+rough*26+fine*10;                // Gran desierto (grandes dunas)
+      else if (humid<0.35) {                                 // Badlands (muy rugoso y erosionado)
+        const bN = fbm(gx/10, gz/10, 5, worldSeed+5005);
+        h = 6+bN*30+rough*10;
+      } else if (humid<0.55) h = 2+rough*14+fine*5;          // Sabana árida
+      else if (humid<0.75) h = 20+rough*42+fine*12;          // Selva densa
+      else h = rough*9+fine*3;                               // Archipiélago (islas bajas)
+    }
+
+    // ── Tipo de tile ─────────────────────────────────────────────────────
+    const lakeN  = fbm(gx/32, gz/32, 2, worldSeed+888);
+    const riverN = fbm(gx/30, gz/30, 3, worldSeed+777);
+    let t;
+    if (h < 0.3 || fine < 0.048) t = T.WATER;
+    else if (lakeN < 0.20 && h < 12 && humid > 0.28) t = T.WATER;
+    else if (Math.abs(riverN-0.50) < 0.018 && h < 18 && humid > 0.22) t = T.WATER;
+    else if (h > 28 || mW > 0.35) t = T.MOUND;
+    // Tundra y zonas de roca alpina baja
+    else if (temp < 0.22 && humid < 0.45) t = T.MOUND;
+    // Desiertos cálidos
+    else if ((temp > 0.62 && humid < 0.40) || (temp > 0.82 && humid < 0.55)) t = T.SAND;
+    // Badlands: mezcla roca + arena
+    else if (temp > 0.82 && humid < 0.35) t = (fine > 0.50) ? T.MOUND : T.SAND;
+    // Pantanos, manglares, humedales
+    else if (h < 5 && humid > 0.78 && fine < 0.38) t = T.WATER;
+    // Bosques
+    else if (humid > 0.58 || (temp > 0.40 && humid > 0.42) || (temp < 0.40 && humid > 0.52)) t = T.FOREST;
+    else t = T.GRASS;
+
+    map[z][x]  = t;
+    hmap[z][x] = (t===T.WATER) ? 0 : Math.max(0, h);
+  }
+
+  // Gaussian blur (1 paso — preserva picos)
+  const bl = hmap.map(r=>[...r]);
+  for (let z=1;z<WORLD-1;z++) for (let x=1;x<WORLD-1;x++) {
+    if (map[z][x]===T.WATER) continue;
+    let sum=0,w=0;
+    for (let dz=-1;dz<=1;dz++) for (let dx=-1;dx<=1;dx++) {
+      if (map[z+dz][x+dx]===T.WATER) continue;
+      const wt=(dz===0&&dx===0)?4:(dz===0||dx===0)?2:1;
+      sum+=hmap[z+dz][x+dx]*wt; w+=wt;
+    }
+    bl[z][x]=sum/w;
+  }
+  for (let z=0;z<WORLD;z++) for (let x=0;x<WORLD;x++) hmap[z][x]=bl[z][x];
+  _hydraulicErosion(hmap, map, WORLD);
+  return { map, hmap, biome, mesh:null, collider:null, trees:[] };
 }
 
 // ── Erosión hidráulica — simula gotas de lluvia sobre el heightmap ────────
@@ -4433,38 +4512,6 @@ function _hydraulicErosion(hmap, map, W) {
   }
 }
 
-function generateChunkData(cx, cz) {
-  const biome = _chunkBiome(cx, cz);
-  const map  = Array.from({length: WORLD}, () => new Array(WORLD).fill(T.GRASS));
-  const hmap = Array.from({length: WORLD}, () => new Array(WORLD).fill(0));
-
-  for (let z = 0; z < WORLD; z++) {
-    for (let x = 0; x < WORLD; x++) {
-      const gx = cx * WORLD + x, gz = cz * WORLD + z;
-      const h  = _globalH(gx, gz);
-      const t  = _globalTile(gx, gz, h);
-      map[z][x]  = t;
-      hmap[z][x] = (t === T.WATER) ? 0 : Math.max(0, h);
-    }
-  }
-  // Gaussian blur — 1 paso (preserva picos de montaña)
-  const bl = hmap.map(r => [...r]);
-  for (let z = 1; z < WORLD - 1; z++) for (let x = 1; x < WORLD - 1; x++) {
-    if (map[z][x] === T.WATER) continue;
-    let sum = 0, w = 0;
-    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
-      if (map[z+dz][x+dx] === T.WATER) continue;
-      const wt = (dz===0&&dx===0)?4:(dz===0||dx===0)?2:1;
-      sum += hmap[z+dz][x+dx]*wt; w += wt;
-    }
-    bl[z][x] = sum / w;
-  }
-  for (let z = 0; z < WORLD; z++) for (let x = 0; x < WORLD; x++) hmap[z][x] = bl[z][x];
-  // Erosión hidráulica
-  _hydraulicErosion(hmap, map, WORLD);
-  return { map, hmap, biome, mesh: null, collider: null, trees: [] };
-}
-
 function buildChunkMesh(cx, cz) {
   const chunk = chunkMap.get(`${cx},${cz}`);
   if (!chunk || chunk.mesh) return;
@@ -4504,7 +4551,17 @@ function buildChunkMesh(cx, cz) {
         const t = ch2.map[tz]?.[tx] ?? T.GRASS;
         const mh = ch2.hmap[tz]?.[tx] ?? 0;
         let [r,g,b] = hexToRgb(BIOME_HEX[t] ?? COLOR.GRASS);
-        if (t===T.MOUND && mh>15) { const s=Math.min((mh-15)/7,1); r+=(0.92-r)*s; g+=(0.96-g)*s; b+=(1.0-b)*s; }
+        if (t===T.MOUND) {
+          if (mh>50){ const s=Math.min((mh-50)/18,1); r+=(0.93-r)*s; g+=(0.96-g)*s; b+=(1.0-b)*s; } // nieve
+          else if (mh>22){ const s=Math.min((mh-22)/28,1); r+=(0.72-r)*s; g+=(0.70-g)*s; b+=(0.74-b)*s; } // roca clara
+          else { r+=(0.55-r)*0.35; g+=(0.40-g)*0.25; b+=(0.32-b)*0.2; } // badlands rojizo
+        }
+        if (t===T.GRASS) {
+          if (mh>18){ r*=0.82; g+=(0.52-g)*0.2; }               // pradera alta: más verde
+          else if (mh<3){ r+=(0.70-r)*0.28; g+=(0.60-g)*0.18; b*=0.72; } // sabana: amarillento
+        }
+        if (t===T.FOREST && mh>20){ r*=0.72; g*=0.78; b+=(0.22-b)*0.2; } // selva alta: verde muy oscuro
+        if (t===T.SAND && mh>12){ r+=(0.88-r)*0.25; g+=(0.78-g)*0.18; }  // dunas altas: más doradas
         sr+=r; sg+=g; sb+=b; cnt++;
       }
       if (!cnt){sr=0.3;sg=0.65;sb=0.3;cnt=1;}
