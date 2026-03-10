@@ -174,6 +174,11 @@ let mazeDmgCooldown = 0;   // cooldown para daño de obstáculos del laberinto
 let towerDoor      = null; // puerta de la torre { mesh, rb, opened, opening, openT, ... }
 let doorMsgCooldown = 0;  // evita spam del mensaje "necesitas la llave"
 
+// ── Sistema de chunks — mundo infinito ──────────────────────
+const chunkMap = new Map(); // "cx,cz" → {map, hmap, mesh, collider, trees, biome}
+const CHUNK_R  = 2;         // radio de carga (chunks)
+let  _chunkTick = 0;        // throttle
+
 // Vectores temporales reutilizables — elimina allocations por frame en move()
 const _tmpQ  = new THREE.Quaternion();
 const _tmpE  = new THREE.Euler();
@@ -202,11 +207,6 @@ function generateMap() {
 
   // ── Biome zones (painted bottom-to-top, later wins) ─────────
 
-  // Bordes mínimos garantizados (se refuerzan con máscara orgánica más adelante)
-  paintRect(0, 0, WORLD, 1, T.DEEP);
-  paintRect(0, WORLD-1, WORLD, WORLD, T.DEEP);
-  paintRect(0, 0, 1, WORLD, T.DEEP);
-  paintRect(WORLD-1, 0, WORLD, WORLD, T.DEEP);
 
   // ── NORTH ─────────────────────────────────────────────────
   // Monte Sombrío (rocoso, norte centro)
@@ -292,36 +292,6 @@ function generateMap() {
       const _dx = x - VILLAGE_CX, _dz = z - VILLAGE_CZ;
       if (_dx*_dx + _dz*_dz <= VILLAGE_R * VILLAGE_R) worldMap[z][x] = T.PATH;
     }
-
-  // ── FORMA DE ISLA ORGÁNICA ────────────────────────────────
-  // Costa irregular con FBM: sur=playas, norte/este/oeste=acantilados
-  for (let z = 0; z < WORLD; z++) {
-    for (let x = 0; x < WORLD; x++) {
-      const t = worldMap[z][x];
-      if (t === T.DWALL || t === T.DFLOOR) continue;
-      // Distancia al borde más cercano (tiles)
-      const edgeDist = Math.min(x, z, WORLD - 1 - x, WORLD - 1 - z);
-      // Ruido FBM que varía la línea de costa 0-5 tiles hacia adentro
-      const coastNoise = fbm(x / 6.5, z / 6.5, 3, worldSeed + 500) * 5.0;
-      const eff = edgeDist - coastNoise;
-      if (eff < 0) {
-        // Erosionado por ruido → océano profundo (acantilado)
-        worldMap[z][x] = T.DEEP;
-      } else if (eff < 2.0) {
-        // Franja costera: sur=arena, resto=agua (acantilados sin playa)
-        const isSouth = z > WORLD * 0.72;
-        worldMap[z][x] = isSouth ? T.SAND : T.WATER;
-      } else if (eff < 4.5 && z > WORLD * 0.78) {
-        // Playa extendida en la costa sur
-        worldMap[z][x] = T.SAND;
-      }
-    }
-  }
-  // Borde exterior garantizado profundo
-  for (let i = 0; i < WORLD; i++) {
-    worldMap[0][i] = worldMap[WORLD-1][i] = T.DEEP;
-    worldMap[i][0] = worldMap[i][WORLD-1] = T.DEEP;
-  }
 
   // ── HEIGHT MAP ───────────────────────────────────────────
   heightMap = [];
@@ -555,7 +525,7 @@ function placeDungeons() {
 // ─────────────────────────────────────────────────────────────
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(COLOR.SKY);
-scene.fog        = new THREE.FogExp2(0xd0eaf8, 0.010); // niebla atmosférica suave
+scene.fog        = new THREE.FogExp2(0x9ec8e8, 0.0018); // niebla suave — mundo infinito
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -613,14 +583,7 @@ function hexToRgb(hex) {
 }
 
 function buildScene() {
-  // ── Océano extendido — plano enorme debajo del mapa ──────────
-  const seaPlane = new THREE.Mesh(
-    new THREE.PlaneGeometry(2000, 2000),
-    new THREE.MeshLambertMaterial({ color: COLOR.WATER })
-  );
-  seaPlane.rotation.x = -Math.PI / 2;
-  seaPlane.position.set(WORLD * TILE / 2, -0.25, WORLD * TILE / 2);
-  scene.add(seaPlane);
+  // (fog ya configurado en setup global)
 
   // ── Smooth terrain mesh (vertex-colored BufferGeometry) ──────
   const V = WORLD + 1; // vertices per side
@@ -1282,8 +1245,11 @@ const SOLID = new Set([T.DWALL, T.DEEP]);
 let stepTimer = 0;
 
 function tileAt(wx, wz) {
-  const tx = Math.floor(wx / TILE), tz = Math.floor(wz / TILE);
-  return worldMap[tz]?.[tx] ?? T.DEEP;
+  const gtx = Math.floor(wx / TILE), gtz = Math.floor(wz / TILE);
+  const cx  = Math.floor(gtx / WORLD), cz  = Math.floor(gtz / WORLD);
+  const tx  = gtx - cx * WORLD,        tz  = gtz - cz * WORLD;
+  const ch  = chunkMap.get(`${cx},${cz}`);
+  return ch?.map[tz]?.[tx] ?? T.GRASS;
 }
 // Mesh vertex height — same averaging logic as the terrain BufferGeometry
 function vertexH(ix, iz) {
@@ -1296,16 +1262,32 @@ function vertexH(ix, iz) {
   }
   return cnt ? sumH / cnt : 0;
 }
+// Vertex height across all chunks (multi-chunk aware)
+function worldVertexH(gx, gz) {
+  let sumH = 0, cnt = 0;
+  for (const [dz, dx] of [[-1,-1],[-1,0],[0,-1],[0,0]]) {
+    const tgx = gx + dx, tgz = gz + dz;
+    const cx  = Math.floor(tgx / WORLD), cz = Math.floor(tgz / WORLD);
+    const tx  = tgx - cx * WORLD,        tz  = tgz - cz * WORLD;
+    if (tx < 0 || tx >= WORLD || tz < 0 || tz >= WORLD) continue;
+    const ch = chunkMap.get(`${cx},${cz}`);
+    if (!ch) continue;
+    const t = ch.map[tz]?.[tx];
+    if (t === undefined) continue;
+    sumH += (t === T.DWALL) ? 0 : (ch.hmap[tz][tx] ?? 0);
+    cnt++;
+  }
+  return cnt ? sumH / cnt : 0;
+}
 // Bilinear interpolation of vertex heights — matches visible terrain surface
 function groundAt(wx, wz) {
-  const tx = Math.floor(wx / TILE), tz = Math.floor(wz / TILE);
-  if (tz < 0 || tz >= WORLD || tx < 0 || tx >= WORLD) return 0;
-  const fx = (wx - tx * TILE) / TILE;
-  const fz = (wz - tz * TILE) / TILE;
-  return vertexH(tx,   tz  ) * (1-fx) * (1-fz)
-       + vertexH(tx+1, tz  ) *    fx  * (1-fz)
-       + vertexH(tx,   tz+1) * (1-fx) *    fz
-       + vertexH(tx+1, tz+1) *    fx  *    fz;
+  const gtx = Math.floor(wx / TILE), gtz = Math.floor(wz / TILE);
+  const fx  = (wx - gtx * TILE) / TILE;
+  const fz  = (wz - gtz * TILE) / TILE;
+  return worldVertexH(gtx,   gtz  ) * (1-fx) * (1-fz)
+       + worldVertexH(gtx+1, gtz  ) *    fx  * (1-fz)
+       + worldVertexH(gtx,   gtz+1) * (1-fx) *    fz
+       + worldVertexH(gtx+1, gtz+1) *    fx  *    fz;
 }
 
 
@@ -1468,7 +1450,6 @@ function move(dt) {
     // Cuando está en suelo, fuerza pequeña hacia abajo para que computedGrounded() funcione
     const yMov = onGround ? -0.5 : jumpVY * dt;
 
-    const maxW = (WORLD - 1) * TILE;
     charCtrl.computeColliderMovement(
       playerCollider,
       { x: wdx, y: yMov, z: wdz },
@@ -1476,9 +1457,7 @@ function move(dt) {
     );
     const cm  = charCtrl.computedMovement();
     const pos = playerBody.translation();
-    const nx  = Math.max(1, Math.min(maxW, pos.x + cm.x));
-    const nz  = Math.max(1, Math.min(maxW, pos.z + cm.z));
-    playerBody.setNextKinematicTranslation({ x: nx, y: pos.y + cm.y, z: nz });
+    playerBody.setNextKinematicTranslation({ x: pos.x + cm.x, y: pos.y + cm.y, z: pos.z + cm.z });
 
     const wasInAir = !onGround;
     onGround = charCtrl.computedGrounded();
@@ -1490,8 +1469,8 @@ function move(dt) {
     if (!keys['Space']) jumpPressed = false;
 
     // Sincronizar rig con el cuerpo físico
-    rig.position.x = nx;
-    rig.position.z = nz;
+    rig.position.x = pos.x + cm.x;
+    rig.position.z = pos.z + cm.z;
     rig.position.y = pos.y + cm.y - CAPS_OFFSET;
   }
 
@@ -2950,6 +2929,7 @@ renderer.setAnimationLoop(() => {
 
   if (!gameEnded) {
     move(dt);
+    if (++_chunkTick % 30 === 0) updateChunks(); // verificar chunks cada 30 frames
     updateEnemies(dt);
     updatePushRocks(dt);
     updateDragons(dt);
@@ -4238,6 +4218,199 @@ function spawnCastleTowers() {
   scene.add(mIM);
 }
 
+// ─────────────────────────────────────────────────────────────
+// SISTEMA DE CHUNKS — MUNDO INFINITO PROCEDURAL
+// ─────────────────────────────────────────────────────────────
+const _BIOMES = ['plains','forest','desert','mountains','swamp','jungle'];
+
+function _chunkBiome(cx, cz) {
+  if (cx === 0 && cz === 0) return 'home';
+  const n = fbm(cx * 0.65, cz * 0.65, 3, 54321);
+  if (n < 0.18) return 'desert';
+  if (n < 0.40) return 'plains';
+  if (n < 0.60) return 'forest';
+  if (n < 0.78) return 'mountains';
+  if (n < 0.90) return 'swamp';
+  return 'jungle';
+}
+
+function generateChunkData(cx, cz) {
+  const biome = _chunkBiome(cx, cz);
+  const map  = Array.from({length: WORLD}, () => new Array(WORLD).fill(T.GRASS));
+  const hmap = Array.from({length: WORLD}, () => new Array(WORLD).fill(0));
+
+  for (let z = 0; z < WORLD; z++) {
+    for (let x = 0; x < WORLD; x++) {
+      const gx = cx * WORLD + x, gz = cz * WORLD + z;
+      const n  = fbm(gx / 15, gz / 15, 4, worldSeed + 200);
+      const n2 = fbm(gx / 6,  gz / 6,  3, worldSeed + 300);
+      switch (biome) {
+        case 'plains':
+          map[z][x]  = n2 < 0.16 ? T.WATER : T.GRASS;
+          hmap[z][x] = n2 < 0.16 ? 0 : n * 9;
+          break;
+        case 'forest':
+          map[z][x]  = n2 < 0.07 ? T.WATER : T.FOREST;
+          hmap[z][x] = n2 < 0.07 ? 0 : 0.5 + n * 13;
+          break;
+        case 'desert':
+          map[z][x]  = n2 < 0.05 ? T.WATER : T.SAND;
+          hmap[z][x] = n2 < 0.05 ? 0 : 0.4 + n * 9;
+          break;
+        case 'mountains':
+          map[z][x]  = n < 0.14 ? T.GRASS : T.MOUND;
+          hmap[z][x] = n < 0.14 ? n * 5   : 3 + n * 34;
+          break;
+        case 'swamp':
+          map[z][x]  = n2 < 0.42 ? T.WATER : T.FOREST;
+          hmap[z][x] = n2 < 0.42 ? 0       : n * 5;
+          break;
+        case 'jungle':
+          map[z][x]  = n2 < 0.12 ? T.WATER : T.FOREST;
+          hmap[z][x] = n2 < 0.12 ? 0       : 0.5 + n * 17;
+          break;
+      }
+    }
+  }
+  // Gaussian blur — 2 passes
+  for (let pass = 0; pass < 2; pass++) {
+    const bl = hmap.map(r => [...r]);
+    for (let z = 1; z < WORLD-1; z++) for (let x = 1; x < WORLD-1; x++) {
+      if (map[z][x] === T.WATER) continue;
+      let sum = 0, w = 0;
+      for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+        if (map[z+dz][x+dx] === T.WATER) continue;
+        const wt = (dz===0&&dx===0)?4:(dz===0||dx===0)?2:1;
+        sum += hmap[z+dz][x+dx]*wt; w += wt;
+      }
+      bl[z][x] = sum/w;
+    }
+    for (let z = 0; z < WORLD; z++) for (let x = 0; x < WORLD; x++) hmap[z][x] = bl[z][x];
+  }
+  return { map, hmap, biome, mesh: null, collider: null, trees: [] };
+}
+
+function buildChunkMesh(cx, cz) {
+  const chunk = chunkMap.get(`${cx},${cz}`);
+  if (!chunk || chunk.mesh) return;
+  const offsetX = cx * WORLD * TILE, offsetZ = cz * WORLD * TILE;
+  const V = WORLD + 1;
+  const positions = new Float32Array(V * V * 3);
+  const colors    = new Float32Array(V * V * 3);
+  const idxArr    = new Uint32Array(WORLD * WORLD * 6);
+  let ii = 0;
+
+  for (let iz = 0; iz < V; iz++) {
+    for (let ix = 0; ix < V; ix++) {
+      const vi  = iz * V + ix;
+      const gx  = cx * WORLD + ix, gz = cz * WORLD + iz;
+      const h   = worldVertexH(gx, gz);
+      let sr=0, sg=0, sb=0, cnt=0;
+      for (const [dz,dx] of [[-1,-1],[-1,0],[0,-1],[0,0]]) {
+        const tgx=gx+dx, tgz=gz+dz;
+        const tcx=Math.floor(tgx/WORLD), tcz=Math.floor(tgz/WORLD);
+        const tx=tgx-tcx*WORLD, tz=tgz-tcz*WORLD;
+        if (tx<0||tx>=WORLD||tz<0||tz>=WORLD) continue;
+        const ch2 = chunkMap.get(`${tcx},${tcz}`);
+        if (!ch2) continue;
+        const t = ch2.map[tz]?.[tx] ?? T.GRASS;
+        const mh = ch2.hmap[tz]?.[tx] ?? 0;
+        let [r,g,b] = hexToRgb(BIOME_HEX[t] ?? COLOR.GRASS);
+        if (t===T.MOUND && mh>15) { const s=Math.min((mh-15)/7,1); r+=(0.92-r)*s; g+=(0.96-g)*s; b+=(1.0-b)*s; }
+        sr+=r; sg+=g; sb+=b; cnt++;
+      }
+      if (!cnt){sr=0.3;sg=0.65;sb=0.3;cnt=1;}
+      positions[vi*3]=offsetX+ix*TILE; positions[vi*3+1]=h; positions[vi*3+2]=offsetZ+iz*TILE;
+      colors[vi*3]=sr/cnt; colors[vi*3+1]=sg/cnt; colors[vi*3+2]=sb/cnt;
+    }
+  }
+  for (let iz=0;iz<WORLD;iz++) for (let ix=0;ix<WORLD;ix++) {
+    const tl=iz*V+ix,tr=tl+1,bl=tl+V,br=bl+1;
+    idxArr[ii++]=tl;idxArr[ii++]=bl;idxArr[ii++]=tr;
+    idxArr[ii++]=tr;idxArr[ii++]=bl;idxArr[ii++]=br;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions,3));
+  geo.setAttribute('color',    new THREE.BufferAttribute(colors,3));
+  geo.setIndex(new THREE.BufferAttribute(idxArr,1));
+  geo.computeVertexNormals();
+  const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({vertexColors:true}));
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+  chunk.mesh = mesh;
+  if (rapierWorld) {
+    chunk.collider = rapierWorld.createCollider(RAPIER.ColliderDesc.trimesh(positions, idxArr));
+  }
+  // Trees
+  _buildChunkTrees(cx, cz, chunk, offsetX, offsetZ);
+}
+
+function _buildChunkTrees(cx, cz, chunk, offsetX, offsetZ) {
+  const forestList=[], grassList=[];
+  const offs = [[0.15,0.15],[0.6,0.2],[0.25,0.65],[-0.1,0.45]];
+  for (let z=0;z<WORLD;z++) for (let x=0;x<WORLD;x++) {
+    const t=chunk.map[z][x];
+    const gx=cx*WORLD+x, gz=cz*WORLD+z;
+    if (t===T.FOREST||(t===T.MOUND&&hash(gx,gz,worldSeed+21)>0.45)) {
+      for (let ti=0;ti<4;ti++) {
+        if (hash(gx*3+ti*13,gz*3+ti*17,worldSeed+33+ti*7)>0.12)
+          forestList.push([x+offs[ti][0], z+offs[ti][1]]);
+      }
+    } else if (t===T.GRASS && hash(gx,gz,worldSeed+44)>0.60) {
+      grassList.push([x+0.5,z+0.5]);
+    }
+  }
+  for (const [list,mi] of [[forestList,0],[grassList,1]]) {
+    if (!list.length || !treePartsList[mi]) continue;
+    const parts = treePartsList[mi][1];
+    for (const {geo,mat} of parts) {
+      const im = new THREE.InstancedMesh(geo, mat, list.length);
+      im.castShadow = true;
+      const td = new THREE.Object3D();
+      list.forEach(([lx,lz],i) => {
+        const wx=offsetX+lx*TILE, wz=offsetZ+lz*TILE;
+        const gy=groundAt(wx,wz);
+        const sc=3.2+hash(cx*WORLD+Math.floor(lx),cz*WORLD+Math.floor(lz),worldSeed+55)*3.5;
+        td.position.set(wx,gy,wz); td.scale.setScalar(sc);
+        td.rotation.y=hash(cx*WORLD+Math.floor(lx),cz*WORLD+Math.floor(lz),worldSeed+66)*Math.PI*2;
+        td.updateMatrix(); im.setMatrixAt(i,td.matrix);
+      });
+      im.instanceMatrix.needsUpdate=true; scene.add(im); chunk.trees.push(im);
+    }
+  }
+}
+
+function unloadChunk(cx, cz) {
+  if (cx===0&&cz===0) return;
+  const ch=chunkMap.get(`${cx},${cz}`); if (!ch) return;
+  if (ch.mesh){ scene.remove(ch.mesh); ch.mesh.geometry.dispose(); ch.mesh=null; }
+  if (ch.collider&&rapierWorld){ rapierWorld.removeCollider(ch.collider,false); ch.collider=null; }
+  ch.trees.forEach(im=>{scene.remove(im); im.geometry?.dispose();});
+  ch.trees=[];
+  chunkMap.delete(`${cx},${cz}`);
+}
+
+function updateChunks() {
+  const px=rig.position.x, pz=rig.position.z;
+  const pcx=Math.floor(px/(WORLD*TILE)), pcz=Math.floor(pz/(WORLD*TILE));
+  for (let dcz=-CHUNK_R;dcz<=CHUNK_R;dcz++) for (let dcx=-CHUNK_R;dcx<=CHUNK_R;dcx++) {
+    const cx=pcx+dcx, cz=pcz+dcz;
+    const key=`${cx},${cz}`;
+    if (!chunkMap.has(key)) {
+      chunkMap.set(key, cx===0&&cz===0
+        ? {map:worldMap,hmap:heightMap,mesh:null,collider:null,trees:[],biome:'home'}
+        : generateChunkData(cx,cz));
+      buildChunkMesh(cx,cz);
+    }
+  }
+  // Unload far chunks
+  for (const key of [...chunkMap.keys()]) {
+    const [cx,cz]=key.split(',').map(Number);
+    if (cx===0&&cz===0) continue;
+    if (Math.abs(cx-pcx)>CHUNK_R+1||Math.abs(cz-pcz)>CHUNK_R+1) unloadChunk(cx,cz);
+  }
+}
+
 function spawnVillage() {
   const VCX = VILLAGE_CX * TILE + TILE / 2; // centro mundo X
   const VCZ = VILLAGE_CZ * TILE + TILE / 2; // centro mundo Z
@@ -4558,6 +4731,10 @@ async function initGame() {
   rig.position.x = settled.x;
   rig.position.z = settled.z;
   rig.position.y = settled.y - CAPS_OFFSET;
+
+  // Inicializar chunk raíz en el mapa de chunks
+  chunkMap.set('0,0', { map: worldMap, hmap: heightMap, mesh: null, collider: null, trees: [], biome: 'home' });
+  updateChunks();
 
   gameReady = true;
   const loadDiv = document.getElementById('loading');
