@@ -3611,8 +3611,8 @@ function _makeSignTex() {
 // ─────────────────────────────────────────────────────────────
 function spawnCastleMaze() {
   const WALL_H = 8.5;
-  const TH     = 1.5;   // half-thickness of walls
-  const BASE   = 0;     // castle floor y=0
+  const TH     = 1.5;   // semi-grosor de muros
+  const BASE   = 0;
 
   function placeWall(cx, cz, hx, hz) {
     const m = new THREE.Mesh(rockGeo, rockMat);
@@ -3627,47 +3627,60 @@ function spawnCastleMaze() {
       );
   }
 
-  // ── Barrera B1 (z=216) — separa entrada sur del área media ──
-  // Gaps: x∈[348,372] (obstáculo A) y x∈[420,444] (obstáculo B)
-  placeWall(312, 216, 36, TH);   // x:276..348
-  placeWall(396, 216, 24, TH);   // x:372..420
-  placeWall(456, 216, 12, TH);   // x:444..468
+  // ════════════════════════════════════════════════════════════
+  // LABERINTO EN SERPENTINA — 4 vueltas obligatorias
+  //
+  // Interior: x∈[276,468]  z∈[156,252]
+  // Entrada:  x≈372,       z=252  (sur, centro)
+  // Llave:    x≈450,       z=161  (NE, tras 4 vueltas)
+  //
+  // Camino correcto:
+  //  Entrada → ir al OESTE (x<312) → cruzar B1 →
+  //  ir al ESTE  (x>432) → cruzar B2 →
+  //  ir al OESTE (x<312) → cruzar B3 →
+  //  ir al ESTE  (x>432) → cruzar B4 → LLAVE
+  //
+  // Cada tramo obliga a recorrer ~156 m de pasillo.
+  // ════════════════════════════════════════════════════════════
 
-  // ── Barrera B2 (z=186) — separa área media del norte ────────
-  // Gaps: x∈[276,306] (paso oeste) y x∈[372,402] (paso este)
-  placeWall(333, 186, 27, TH);   // x:306..360
-  placeWall(429, 186, 27, TH);   // x:402..456
-  // extremo este abierto: x:456..468
+  // ── B1 (z=228): gap OESTE x:276-312 ──────────────────────────
+  placeWall(390, 228, 78, TH);   // bloquea x:312-468
 
-  // ── Muro norte parcial (crea corredor final hacia la llave) ──
-  placeWall(291, 168, 15, TH);   // x:276..306
-  placeWall(435, 168, 33, TH);   // x:402..468
+  // ── B2 (z=210): gap ESTE  x:432-468 ──────────────────────────
+  placeWall(354, 210, 78, TH);   // bloquea x:276-432
 
-  // ── Divisores verticales — zona sur (z:216..252) ─────────────
-  placeWall(348, 234, TH, 18);   // x=348, z:216..252
-  placeWall(420, 240, TH, 12);   // x=420, z:228..252
+  // ── B3 (z=186): gap OESTE x:276-312 ──────────────────────────
+  placeWall(390, 186, 78, TH);   // bloquea x:312-468
 
-  // ── Divisores verticales — zona media (z:186..216) ───────────
-  placeWall(306, 201, TH, 15);   // x=306, z:186..216
-  placeWall(378, 204, TH, 12);   // x=378, z:192..216
-  placeWall(456, 204, TH, 12);   // x=456, z:192..216
+  // ── B4 (z=168): gap ESTE  x:432-468 → llave ──────────────────
+  placeWall(354, 168, 78, TH);   // bloquea x:276-432
 
-  // ── Divisores verticales — zona norte (z:156..186) ───────────
-  placeWall(330, 171, TH, 15);   // x=330, z:156..186
-  placeWall(414, 177, TH,  9);   // x=414, z:168..186
+  // ── Salas falsas: alcobas sin salida para despistar ───────────
 
-  // ── Obstáculos móviles ───────────────────────────────────────
-  // Gap B1 oeste (x=360, z=216): piedra sube/baja
-  _addMazeObs(360, 216, 'updown', 0);
-  // Gap B1 este (x=432, z=216): piedra sube/baja, desfasada
-  _addMazeObs(432, 216, 'updown', Math.PI);
-  // Gap B2 oeste (x=291, z=186): brazo giratorio
-  _addMazeObs(291, 186, 'orbit', 0);
-  // Gap B2 este (x=387, z=186): brazo giratorio
-  _addMazeObs(387, 186, 'orbit', Math.PI * 0.65);
+  // Zona entrada (z:228-252): sala este — dead end al explorar derecha
+  placeWall(432, 240, TH, 12);   // x=432, z:228-252
 
-  // ── Llave ────────────────────────────────────────────────────
-  // Escondida en el corredor norte, zona NE (x=366, z=162)
+  // Zona B1-B2 (z:210-228, 18m): alcoba NE — parece salida al este
+  placeWall(432, 223, TH, 4.5);  // x=432, z:218.5-227.5  (mitad norte)
+  //   → jugador puede cruzar x=432 por z:210-218.5 (mitad sur, libre)
+
+  // Zona B2-B3 (z:186-210, 24m): dos alcobas opuestas
+  placeWall(348, 204, TH, 6);    // x=348, z:198-210  (NW alcoba, mitad norte)
+  //   → jugador cruza x=348 por z:186-198 (mitad sur, libre)
+  placeWall(432, 192, TH, 6);    // x=432, z:186-198  (SE alcoba, mitad sur)
+  //   → jugador cruza x=432 por z:198-210 (mitad norte, libre)
+
+  // Zona B3-B4 (z:168-186, 18m): alcoba SW — falsa promesa al oeste
+  placeWall(348, 172, TH, 4.5);  // x=348, z:167.5-176.5 (mitad sur)
+  //   → jugador cruza x=348 por z:176.5-186 (mitad norte, libre)
+
+  // ── Obstáculos móviles en cada gap ───────────────────────────
+  _addMazeObs(294, 228, 'orbit',  0);            // B1 gap oeste
+  _addMazeObs(450, 210, 'updown', 0);            // B2 gap este
+  _addMazeObs(294, 186, 'updown', Math.PI);      // B3 gap oeste
+  _addMazeObs(450, 168, 'orbit',  Math.PI * 0.5); // B4 gap este (guarda llave)
+
+  // ── Llave: sala NE, tras superar B4 ──────────────────────────
   const kMat = new THREE.MeshLambertMaterial({
     color: 0xffd700, emissive: 0xcc7700, emissiveIntensity: 0.7,
   });
@@ -3687,10 +3700,10 @@ function spawnCastleMaze() {
     kGroup.add(tooth);
   }
 
-  kGroup.position.set(366, 1.8, 162);
+  kGroup.position.set(450, 1.8, 161);
   kGroup.scale.setScalar(2.2);
   scene.add(kGroup);
-  mazeKey = { mesh: kGroup, wx: 366, wz: 162, collected: false };
+  mazeKey = { mesh: kGroup, wx: 450, wz: 161, collected: false };
 }
 
 function _addMazeObs(cx, cz, type, phase) {
@@ -3848,12 +3861,12 @@ function spawnSpiralStairs() {
   const towerR   = TILE * 1.3;
   const innerR   = towerR - WALL_D / 2;
 
-  const N_PLAT      = 64;               // número de plataformas (doble)
+  const N_PLAT      = 64;               // número de plataformas
   const N_TURNS     = 8;                // vueltas totales de la espiral
-  const STEP_H_RISE = 1.2;             // altura por escalón — 64×1.2=76.8m cabe en la torre
-  const PLAT_D      = 3.0;             // profundidad radial (m) — doble
-  const PLAT_R      = innerR - PLAT_D * 0.5; // borde exterior ras con el muro interior
-  const PLAT_W      = 7.6;             // ancho de la plataforma (m) — doble
+  const STEP_H_RISE = 1.2;             // altura por escalón
+  const PLAT_D      = 3.0;             // profundidad radial (m)
+  const PLAT_R      = innerR - PLAT_D; // más adentro: borde exterior 1.5m libre del muro
+  const PLAT_W      = 14.0;            // ancho amplio: peldaños se solapan, sin huecos
   const PLAT_T      = 0.9;             // grosor/alto del bloque (m)
 
   const SX = PLAT_W / 0.68;
@@ -3885,7 +3898,7 @@ function spawnSpiralStairs() {
     for (let s = 0; s < N_PLAT; s++) {
       const frac  = s / (N_PLAT - 1);
       const angle = startAngle + frac * Math.PI * 2 * N_TURNS;
-      const platY = bh + (s + 1) * STEP_H_RISE; // primer peldaño a STEP_H_RISE del suelo
+      const platY = bh + (s + 1) * STEP_H_RISE;
       const platX = wx + Math.cos(angle) * PLAT_R;
       const platZ = wz + Math.sin(angle) * PLAT_R;
 
@@ -3914,20 +3927,25 @@ function spawnSpiralStairs() {
 // PUENTE — Torre SW → cima muro castillo
 // ─────────────────────────────────────────────────────────────
 function spawnTowerDoor() {
-  // Mismas constantes que spawnBridge() para coincidir con el inicio del puente
+  // Mismas constantes que spawnCastleTowers() para coincidir con la geometría del arco
   const towerR = TILE * 1.3, WALL_D = TILE * 0.55, BLOCK_H = TILE * 0.52;
-  const innerR  = towerR - WALL_D / 2;
+  const outerR  = towerR + WALL_D / 2;
+  const ROCKS_RING = 24, DOOR_SEGS = 4, DOOR_LAYERS = 3;
+  const segAngle = (2 * Math.PI) / ROCKS_RING;
   const CASTLE_CX = 31 * TILE + TILE * 0.5, CASTLE_CZ = 17 * TILE + TILE * 0.5;
   const wx = 17 * TILE + TILE * 0.5, wz = 24 * TILE + TILE * 0.5;
   const bh = groundAt(wx, wz);
   const doorAngle = Math.atan2(CASTLE_CZ - wz, CASTLE_CX - wx);
   const cdx = Math.cos(doorAngle), cdz = Math.sin(doorAngle);
 
-  // Posición: justo en la apertura interior de la torre (inicio del puente)
-  const doorX = wx + cdx * (innerR - 0.4);
-  const doorZ = wz + cdz * (innerR - 0.4);
-  const doorBaseY = bh + BLOCK_H * 10;  // misma altura que el suelo del puente
-  const DOOR_W = 6.0, DOOR_H = 7.5, DOOR_T = 1.2;
+  // Posición: centrada en el espesor del muro (towerR), a nivel del suelo
+  const doorX = wx + cdx * towerR;
+  const doorZ = wz + cdz * towerR;
+  const doorBaseY = bh;  // nivel del suelo — entrada baja de la torre
+  // Dimensiones que cubren todo el hueco del arco (cuerda al radio exterior × margen)
+  const DOOR_W = segAngle * DOOR_SEGS * outerR * 1.10;  // cubre el ancho total del arco
+  const DOOR_H = DOOR_LAYERS * BLOCK_H;                  // ≈ alto del arco
+  const DOOR_T = WALL_D * 1.05;                          // tan gruesa como el muro
 
   // Rotación: cara de la puerta perpendicular al puente (bloquea el paso)
   const faceQ = new THREE.Quaternion().setFromUnitVectors(
@@ -3942,16 +3960,20 @@ function spawnTowerDoor() {
   mesh.castShadow = mesh.receiveShadow = true;
   scene.add(mesh);
 
-  // Barrotes de madera para que parezca una reja/portcullis
+  // Barrotes verticales y travesaños para que parezca una reja/portcullis
   const barMat = new THREE.MeshLambertMaterial({ color: 0x3a1f00 });
-  for (let i = -1; i <= 1; i++) {
-    const bar = new THREE.Mesh(new THREE.BoxGeometry(0.22, DOOR_H * 0.9, DOOR_T * 1.1), barMat);
-    bar.position.set(i * DOOR_W * 0.28, 0, 0);
+  const N_VBARS = 7;
+  for (let i = 0; i < N_VBARS; i++) {
+    const bx = (i / (N_VBARS - 1) - 0.5) * DOOR_W * 0.88;
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(0.35, DOOR_H * 0.96, DOOR_T * 1.05), barMat);
+    bar.position.set(bx, 0, 0);
     mesh.add(bar);
   }
-  for (let j = -1; j <= 1; j++) {
-    const rail = new THREE.Mesh(new THREE.BoxGeometry(DOOR_W * 0.9, 0.22, DOOR_T * 1.1), barMat);
-    rail.position.set(0, j * DOOR_H * 0.28, 0);
+  const N_HBARS = 5;
+  for (let j = 0; j < N_HBARS; j++) {
+    const by = (j / (N_HBARS - 1) - 0.5) * DOOR_H * 0.88;
+    const rail = new THREE.Mesh(new THREE.BoxGeometry(DOOR_W * 0.92, 0.30, DOOR_T * 1.05), barMat);
+    rail.position.set(0, by, 0);
     mesh.add(rail);
   }
 
@@ -4271,6 +4293,33 @@ function spawnVillage() {
   });
   wIM.instanceMatrix.needsUpdate = true;
   scene.add(wIM);
+
+  // ── Almenas (merlones) en la cima del muro circular ──────────
+  // Cada 2 segmentos: uno lleva merlón, el siguiente está vacío → aspecto de almena
+  const MERL_H  = LAYER_H * 1.35;   // más alto que un bloque normal
+  const MERL_W  = WALL_W * 0.65;    // más estrecho → hueco visible entre almenas
+  const topY_base = WALL_LAYERS * LAYER_H; // altura de la cima del muro
+  const mSX = MERL_W / 0.68, mSY = MERL_H / 1.02, mSZ = (WALL_D * 0.85) / 0.68;
+
+  // Contar merlones (solo índices pares del array wallAngles)
+  const merlonAngles = wallAngles.filter((_, i) => i % 2 === 0);
+  if (merlonAngles.length > 0) {
+    const merIM = new THREE.InstancedMesh(rockGeo, rockMat, merlonAngles.length);
+    merIM.castShadow = true;
+    const md = new THREE.Object3D();
+    merlonAngles.forEach((angle, mi) => {
+      const mx = VCX + wallWorldR * Math.cos(angle);
+      const mz = VCZ + wallWorldR * Math.sin(angle);
+      const mBaseH = groundAt(mx, mz);
+      md.position.set(mx, mBaseH + topY_base + MERL_H * 0.5, mz);
+      md.rotation.set(0, -(Math.PI / 2 + angle), 0);
+      md.scale.set(mSX, mSY, mSZ);
+      md.updateMatrix();
+      merIM.setMatrixAt(mi, md.matrix);
+    });
+    merIM.instanceMatrix.needsUpdate = true;
+    scene.add(merIM);
+  }
 
   // ── Fuente en el centro de la plaza ─────────────────────────
   const fy = groundAt(VCX, VCZ);
