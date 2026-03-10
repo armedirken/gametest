@@ -1778,6 +1778,359 @@ const ENEMY_MAT_DMGD  = new THREE.MeshLambertMaterial({ color: 0xff2222 });
 const ENEMY_MAT_EYE   = new THREE.MeshLambertMaterial({ color: 0xffffff });
 const ENEMY_MAT_PUPIL = new THREE.MeshLambertMaterial({ color: 0x111111 });
 
+// ── Materiales de enemigos por bioma ─────────────────────────────────────────
+const EMAT_WOLF    = new THREE.MeshLambertMaterial({ color: 0x6b6b6b });  // gris
+const EMAT_WORM    = new THREE.MeshLambertMaterial({ color: 0xc8961e });  // arena dorada
+const EMAT_TROLL   = new THREE.MeshLambertMaterial({ color: 0x8ab4c8 });  // azul hielo
+const EMAT_SPIDER  = new THREE.MeshLambertMaterial({ color: 0x3a1a5c });  // morado oscuro
+const EMAT_SWAMP   = new THREE.MeshLambertMaterial({ color: 0x3d6b2c });  // verde pantano
+const EMAT_GOLEM   = new THREE.MeshLambertMaterial({ color: 0x8a6a4a });  // marrón roca
+
+// Función auxiliar: genera el objeto base de un enemigo (datos de combate)
+function _mkEnemyBase(wx, wz, opts) {
+  const wy = groundAt(wx, wz);
+  opts.mesh.position.set(wx, wy, wz);
+  scene.add(opts.mesh);
+  const h = hash(wx * 0.01, wz * 0.01, worldSeed + 99);
+  return {
+    mesh:       opts.mesh,
+    hp:         opts.hp   ?? 3,
+    hitCooldown: 0,
+    dead:       false,
+    deathT:     0,
+    spawnX:     wx,
+    spawnZ:     wz,
+    aggroed:    false,
+    aggroRange: opts.aggroRange ?? 8,
+    chaseSpeed: opts.chaseSpeed ?? 2.2,
+    lungeRange: opts.lungeRange ?? 2.6,
+    lungeSpeed: opts.lungeSpeed ?? 7,
+    hitRange:   opts.hitRange   ?? 1.4,
+    swordHitRange: opts.swordHitRange ?? 1.2,
+    vx: 0, vz: 0, squashT: 0, hitFlashT: 0,
+    patrolTarget: null,
+    patrolPause:  h * 1.5,
+    patrolStep:   Math.floor(h * 99),
+    lungePhase:   'cooldown',
+    lungeT:       h * 1.2,
+    lungeDir:     new THREE.Vector3(),
+    lungeDamaged: false,
+    phase:        h * Math.PI * 2,
+    _bodyChildIdx: opts.bodyChildIdx ?? 0,
+    _dmgMat:    ENEMY_MAT_BODY,  // sobreescrito por cada factory
+    ...opts.extra,
+  };
+}
+
+// ── Lobo (taiga, bosque templado, bosque mixto, jungla) ─────────────────────
+function createWolf(wx, wz) {
+  const g = new THREE.Group();
+  // Cuerpo alargado
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.45, 0.90), EMAT_WOLF);
+  body.position.y = 0.55;
+  g.add(body);
+  // Cabeza
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.34, 0.36), EMAT_WOLF);
+  head.position.set(0, 0.78, 0.42);
+  g.add(head);
+  // Hocico
+  const snout = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.16, 0.22), EMAT_WOLF);
+  snout.position.set(0, 0.71, 0.62);
+  g.add(snout);
+  // Ojos amarillos
+  const eyeM = new THREE.MeshLambertMaterial({ color: 0xffdd00, emissive: 0x886600, emissiveIntensity: 0.6 });
+  for (const sx of [-0.12, 0.12]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.06, 5, 4), eyeM);
+    eye.position.set(sx, 0.83, 0.60);
+    g.add(eye);
+  }
+  // 4 patas (simples cilindros)
+  const legM = new THREE.MeshLambertMaterial({ color: 0x555555 });
+  for (const [lx, lz] of [[-0.20,-0.28],[ 0.20,-0.28],[-0.20, 0.28],[ 0.20, 0.28]]) {
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.065, 0.50, 5), legM);
+    leg.position.set(lx, 0.28, lz);
+    g.add(leg);
+  }
+  // Cola
+  const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.065, 0.48, 5), EMAT_WOLF);
+  tail.rotation.x = 0.9;
+  tail.position.set(0, 0.70, -0.52);
+  g.add(tail);
+  const e = _mkEnemyBase(wx, wz, {
+    mesh: g, hp: 2, aggroRange: 12, chaseSpeed: 5.5,
+    lungeRange: 2.0, lungeSpeed: 10, hitRange: 1.2, swordHitRange: 1.4,
+    bodyChildIdx: 0, extra: { _wolfBody: true },
+  });
+  e._dmgMat = EMAT_WOLF;
+  return e;
+}
+
+// ── Gusano de arena (desierto, sahel, badlands, hotdesert, aridsavanna) ──────
+function createSandWorm(wx, wz) {
+  const g = new THREE.Group();
+  // Segmentos del gusano (anillos apilados)
+  const seg1 = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.48, 0.60, 10), EMAT_WORM);
+  seg1.position.y = 0.70;
+  g.add(seg1);
+  const seg2 = new THREE.Mesh(new THREE.CylinderGeometry(0.48, 0.38, 0.50, 10), EMAT_WORM);
+  seg2.position.y = 1.28;
+  g.add(seg2);
+  const seg3 = new THREE.Mesh(new THREE.CylinderGeometry(0.38, 0.28, 0.40, 10), EMAT_WORM);
+  seg3.position.y = 1.76;
+  g.add(seg3);
+  // Boca (anillo oscuro)
+  const mouthM = new THREE.MeshLambertMaterial({ color: 0x3a2200 });
+  const mouth = new THREE.Mesh(new THREE.TorusGeometry(0.38, 0.10, 6, 12), mouthM);
+  mouth.position.y = 2.00;
+  mouth.rotation.x = Math.PI / 2;
+  g.add(mouth);
+  // Dientes (conos pequeños)
+  const toothM = new THREE.MeshLambertMaterial({ color: 0xf5f0dd });
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2;
+    const tooth = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.14, 4), toothM);
+    tooth.position.set(Math.cos(a) * 0.32, 2.05, Math.sin(a) * 0.32);
+    tooth.rotation.x = Math.PI;
+    g.add(tooth);
+  }
+  // El gusano empieza bajo tierra
+  g.position.y = -2.5;
+  scene.add(g);
+  const wy = groundAt(wx, wz);
+  g.position.set(wx, wy - 2.5, wz);
+  const e = {
+    mesh: g, hp: 5, hitCooldown: 0, dead: false, deathT: 0,
+    spawnX: wx, spawnZ: wz, aggroed: false,
+    aggroRange: 10, chaseSpeed: 2.0, lungeRange: 3.0, lungeSpeed: 5, hitRange: 1.6, swordHitRange: 1.8,
+    vx: 0, vz: 0, squashT: 0, hitFlashT: 0,
+    patrolTarget: null, patrolPause: Math.random() * 2,
+    patrolStep: Math.floor(Math.random() * 99),
+    lungePhase: 'cooldown', lungeT: Math.random() * 2,
+    lungeDir: new THREE.Vector3(), lungeDamaged: false,
+    phase: Math.random() * Math.PI * 2,
+    _bodyChildIdx: 0, _dmgMat: EMAT_WORM,
+    _worm: true,
+    _wormState: 'hidden',  // 'hidden' | 'emerging' | 'surface' | 'submerging'
+    _wormT: 1.5 + Math.random() * 3,
+    _wormGroundY: wy,
+  };
+  return e;
+}
+
+// ── Troll de hielo (tundra, alpine) ──────────────────────────────────────────
+function createIceTroll(wx, wz) {
+  const g = new THREE.Group();
+  // Cuerpo grande y robusto
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.52, 0.62, 1.40, 8), EMAT_TROLL);
+  body.position.y = 0.85;
+  g.add(body);
+  // Cabeza
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.44, 8, 6), EMAT_TROLL);
+  head.scale.y = 0.80;
+  head.position.y = 1.80;
+  g.add(head);
+  // Cuernos de hielo
+  const hornM = new THREE.MeshLambertMaterial({ color: 0xd0f0ff, transparent: true, opacity: 0.85 });
+  for (const sx of [-0.28, 0.28]) {
+    const horn = new THREE.Mesh(new THREE.ConeGeometry(0.085, 0.42, 5), hornM);
+    horn.position.set(sx, 2.18, 0);
+    g.add(horn);
+  }
+  // Brazos
+  const armM = new THREE.MeshLambertMaterial({ color: 0x7ab0c4 });
+  for (const [ax, az] of [[-0.75, 0], [0.75, 0]]) {
+    const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.10, 0.75, 6), armM);
+    arm.position.set(ax, 1.20, az);
+    arm.rotation.z = ax < 0 ? 0.7 : -0.7;
+    g.add(arm);
+  }
+  // Ojos rojos brillantes
+  const eyeM = new THREE.MeshLambertMaterial({ color: 0xff2200, emissive: 0xff0000, emissiveIntensity: 0.8 });
+  for (const sx of [-0.16, 0.16]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.08, 5, 4), eyeM);
+    eye.position.set(sx, 1.84, 0.36);
+    g.add(eye);
+  }
+  const e = _mkEnemyBase(wx, wz, {
+    mesh: g, hp: 7, aggroRange: 6, chaseSpeed: 1.5,
+    lungeRange: 3.0, lungeSpeed: 8, hitRange: 2.0, swordHitRange: 1.8,
+    bodyChildIdx: 0, extra: { _trollBody: true },
+  });
+  e._dmgMat = EMAT_TROLL;
+  return e;
+}
+
+// ── Araña de la jungla (jungle, tropicalforest, rainforest, mangrove) ────────
+function createJungleSpider(wx, wz) {
+  const g = new THREE.Group();
+  // Abdomen
+  const abdo = new THREE.Mesh(new THREE.SphereGeometry(0.34, 7, 5), EMAT_SPIDER);
+  abdo.scale.set(1, 0.80, 1.3);
+  abdo.position.y = 0.38;
+  g.add(abdo);
+  // Cefalotórax (cabeza+pecho)
+  const ceph = new THREE.Mesh(new THREE.SphereGeometry(0.24, 6, 4), EMAT_SPIDER);
+  ceph.position.set(0, 0.42, 0.40);
+  g.add(ceph);
+  // 8 patas
+  const legM = new THREE.MeshLambertMaterial({ color: 0x2a0e44 });
+  for (let i = 0; i < 8; i++) {
+    const side = i < 4 ? -1 : 1;
+    const idx = i % 4;
+    const legGeo = new THREE.CylinderGeometry(0.030, 0.025, 0.55, 4);
+    const leg = new THREE.Mesh(legGeo, legM);
+    leg.position.set(side * (0.30 + idx * 0.06), 0.28, (idx - 1.5) * 0.14);
+    leg.rotation.z = side * (0.6 + idx * 0.05);
+    leg.rotation.x = 0.3;
+    g.add(leg);
+  }
+  // Ojos múltiples (6 ojos rojos)
+  const spEyeM = new THREE.MeshLambertMaterial({ color: 0xff0000, emissive: 0xaa0000, emissiveIntensity: 0.7 });
+  for (let i = 0; i < 6; i++) {
+    const ex = (i % 3 - 1) * 0.10, ey = 0.52 + (i < 3 ? 0 : 0.08);
+    const sEye = new THREE.Mesh(new THREE.SphereGeometry(0.035, 4, 3), spEyeM);
+    sEye.position.set(ex, ey, 0.62);
+    g.add(sEye);
+  }
+  const e = _mkEnemyBase(wx, wz, {
+    mesh: g, hp: 2, aggroRange: 10, chaseSpeed: 4.8,
+    lungeRange: 1.8, lungeSpeed: 9, hitRange: 1.0, swordHitRange: 1.0,
+    bodyChildIdx: 0, extra: { _spiderBody: true },
+  });
+  e._dmgMat = EMAT_SPIDER;
+  return e;
+}
+
+// ── Criatura del pantano (coldswamp, tropicalwetland) ────────────────────────
+function createSwampCreature(wx, wz) {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.44, 8, 6), EMAT_SWAMP);
+  body.scale.set(1.1, 0.80, 1.1);
+  body.position.y = 0.38;
+  g.add(body);
+  // Giba dorsal
+  const hump = new THREE.Mesh(new THREE.SphereGeometry(0.26, 6, 4), EMAT_SWAMP);
+  hump.position.set(0, 0.72, -0.10);
+  g.add(hump);
+  // Cabeza plana
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.28, 6, 4), EMAT_SWAMP);
+  head.scale.y = 0.60;
+  head.position.set(0, 0.68, 0.38);
+  g.add(head);
+  const swScleraM = new THREE.MeshLambertMaterial({ color: 0xfefefe });
+  const swPupilM  = new THREE.MeshLambertMaterial({ color: 0x111111 });
+  for (const sx of [-0.14, 0.14]) {
+    const sclera = new THREE.Mesh(new THREE.SphereGeometry(0.085, 5, 4), swScleraM);
+    const pupil  = new THREE.Mesh(new THREE.SphereGeometry(0.050, 4, 3), swPupilM);
+    sclera.position.set(sx, 0.76, 0.58);
+    pupil.position.set(sx, 0.76, 0.66);
+    g.add(sclera, pupil);
+  }
+  // Aletas / branquias
+  const gillM = new THREE.MeshLambertMaterial({ color: 0x5a9a40, transparent: true, opacity: 0.7 });
+  for (const sx of [-0.50, 0.50]) {
+    const gill = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.12, 0.36, 5), gillM);
+    gill.position.set(sx, 0.48, 0);
+    gill.rotation.z = sx < 0 ? 0.5 : -0.5;
+    g.add(gill);
+  }
+  const e = _mkEnemyBase(wx, wz, {
+    mesh: g, hp: 4, aggroRange: 7, chaseSpeed: 1.8,
+    lungeRange: 2.2, lungeSpeed: 6, hitRange: 1.5, swordHitRange: 1.3,
+    bodyChildIdx: 0, extra: {},
+  });
+  e._dmgMat = EMAT_SWAMP;
+  return e;
+}
+
+// ── Gólem de roca (mountains, highlands, badlands) ───────────────────────────
+function createRockGolem(wx, wz) {
+  const g = new THREE.Group();
+  // Cuerpo principal (caja angulosa)
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.92, 1.20, 0.72), EMAT_GOLEM);
+  body.position.y = 0.90;
+  g.add(body);
+  // Cabeza angular
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.50, 0.54), EMAT_GOLEM);
+  head.position.y = 1.70;
+  g.add(head);
+  // Ojos brillantes (lava interior)
+  const lavaM = new THREE.MeshLambertMaterial({ color: 0xff6600, emissive: 0xff3300, emissiveIntensity: 1.0 });
+  for (const sx of [-0.14, 0.14]) {
+    const eye = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.06, 0.04), lavaM);
+    eye.position.set(sx, 1.74, 0.28);
+    g.add(eye);
+  }
+  // Brazos pétreos
+  const armM = new THREE.MeshLambertMaterial({ color: 0x7a5a3a });
+  for (const sx of [-0.65, 0.65]) {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.85, 0.30), armM);
+    arm.position.set(sx, 1.00, 0);
+    arm.rotation.z = sx < 0 ? 0.25 : -0.25;
+    g.add(arm);
+  }
+  const e = _mkEnemyBase(wx, wz, {
+    mesh: g, hp: 8, aggroRange: 5, chaseSpeed: 1.2,
+    lungeRange: 3.2, lungeSpeed: 6, hitRange: 2.2, swordHitRange: 1.6,
+    bodyChildIdx: 0, extra: { _golemBody: true },
+  });
+  e._dmgMat = EMAT_GOLEM;
+  return e;
+}
+
+// Slime en coordenadas mundo (mismo que createEnemy pero con wx,wz ya en metros)
+function createSlimeAt(wx, wz) {
+  const g    = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.42, 8, 6), ENEMY_MAT_BODY);
+  body.scale.y = 0.65;
+  body.position.y = 0.3;
+  body.castShadow = true;
+  g.add(body);
+  for (const sx of [-0.16, 0.16]) {
+    const eye   = new THREE.Mesh(new THREE.SphereGeometry(0.1, 6, 4), ENEMY_MAT_EYE);
+    const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.055, 4, 3), ENEMY_MAT_PUPIL);
+    eye.position.set(sx, 0.46, 0.33);
+    pupil.position.set(sx, 0.46, 0.43);
+    g.add(eye, pupil);
+  }
+  const wy = groundAt(wx, wz);
+  g.position.set(wx, wy, wz);
+  scene.add(g);
+  const h = hash(wx * 0.01, wz * 0.01, worldSeed + 42);
+  return {
+    mesh: g, hp: 3, hitCooldown: 0, dead: false, deathT: 0,
+    spawnX: wx, spawnZ: wz, aggroed: false,
+    aggroRange: 8, chaseSpeed: 2.2, lungeRange: 2.6, lungeSpeed: 7, hitRange: 1.4, swordHitRange: 1.2,
+    vx: 0, vz: 0, squashT: 0, hitFlashT: 0,
+    patrolTarget: null, patrolPause: h * 1.5, patrolStep: Math.floor(h * 99),
+    lungePhase: 'cooldown', lungeT: h * 1.2, lungeDir: new THREE.Vector3(), lungeDamaged: false,
+    phase: h * Math.PI * 2, _dmgMat: ENEMY_MAT_BODY,
+  };
+}
+
+// ── Mapa bioma → función creadora ─────────────────────────────────────────────
+const BIOME_ENEMY_FACTORY = {
+  taiga:          createWolf,
+  tempforest:     createWolf,
+  mixedforest:    createWolf,
+  jungle:         createJungleSpider,
+  tropicalforest: createJungleSpider,
+  rainforest:     createJungleSpider,
+  mangrove:       createSwampCreature,
+  desert:         createSandWorm,
+  hotdesert:      createSandWorm,
+  sahel:          createSandWorm,
+  aridsavanna:    createSandWorm,
+  badlands:       createSandWorm,
+  tundra:         createIceTroll,
+  alpine:         createIceTroll,
+  mountains:      createRockGolem,
+  highlands:      createRockGolem,
+  coldswamp:      createSwampCreature,
+  tropicalwetland:createSwampCreature,
+  // todos los demás → slime (default)
+};
+
 function createEnemy(gx, gz) {
   const g     = new THREE.Group();
   const body  = new THREE.Mesh(new THREE.SphereGeometry(0.42, 8, 6), ENEMY_MAT_BODY);
@@ -1814,6 +2167,7 @@ function createEnemy(gx, gz) {
     lungeDamaged: false,
     // Per-enemy animation phase offset
     phase: hash(gx, gz, worldSeed + 42) * Math.PI * 2,
+    _dmgMat: ENEMY_MAT_BODY,
   };
 }
 
@@ -1829,6 +2183,42 @@ function spawnEnemies() {
       if (PUSH_TILES.has(t) && hash(x, z, worldSeed + 88)  > 0.988) continue; // roca empujable
       if (PUSH_TILES.has(t) && hash(x, z, worldSeed + 777) > 0.988) continue; // torre
       if (hash(x, z, worldSeed + 30) > 0.91) enemies.push(createEnemy(x, z));
+    }
+  }
+}
+
+// Genera enemigos bioma-específicos para un chunk recién cargado
+function spawnChunkEnemies(cx, cz) {
+  if (cx === 0 && cz === 0) return; // chunk raíz ya tiene spawnEnemies()
+  const chunk = chunkMap.get(`${cx},${cz}`);
+  if (!chunk) return;
+  const biome = chunk.biome ?? 'plains';
+  const factory = BIOME_ENEMY_FACTORY[biome] ?? createSlimeAt;
+  const offsetX = cx * WORLD * TILE, offsetZ = cz * WORLD * TILE;
+
+  // Tiles que permiten spawn según tipo
+  const SAND_BIOMES   = new Set(['desert','hotdesert','sahel','aridsavanna','badlands']);
+  const WATER_BIOMES  = new Set(['coldswamp','tropicalwetland','mangrove']);
+  const MOUND_BIOMES  = new Set(['mountains','highlands','alpine','tundra']);
+
+  let allowedTiles;
+  if (SAND_BIOMES.has(biome))  allowedTiles = new Set([T.SAND, T.GRASS]);
+  else if (WATER_BIOMES.has(biome)) allowedTiles = new Set([T.GRASS, T.FOREST, T.SAND]);
+  else if (MOUND_BIOMES.has(biome)) allowedTiles = new Set([T.MOUND, T.GRASS]);
+  else allowedTiles = new Set([T.GRASS, T.FOREST, T.MOUND, T.SAND]);
+
+  // Densidad: ~1 enemigo por ~9 tiles en promedio (threshold 0.89)
+  const threshold = 0.89;
+
+  for (let lz = 1; lz < WORLD - 1; lz++) {
+    for (let lx = 1; lx < WORLD - 1; lx++) {
+      const t = chunk.map[lz]?.[lx];
+      if (!allowedTiles.has(t)) continue;
+      const gx = cx * WORLD + lx, gz = cz * WORLD + lz;
+      if (hash(gx, gz, worldSeed + 555) < threshold) continue;
+      const wx = offsetX + lx * TILE + TILE / 2;
+      const wz = offsetZ + lz * TILE + TILE / 2;
+      enemies.push(factory(wx, wz));
     }
   }
 }
@@ -1895,12 +2285,38 @@ function updateEnemies(dt) {
     if (e.hitFlashT > 0) {
       e.hitFlashT -= dt;
       e.mesh.children[0].material = ENEMY_MAT_DMGD;
-      if (e.hitFlashT <= 0) e.mesh.children[0].material = e._bossMat || ENEMY_MAT_BODY;
+      if (e.hitFlashT <= 0) e.mesh.children[0].material = e._bossMat || e._dmgMat || ENEMY_MAT_BODY;
+    }
+
+    // ── Gusano de arena: lógica emerge/submerge ───────────────────────────────
+    if (e._worm) {
+      e._wormGroundY = groundAt(e.mesh.position.x, e.mesh.position.z);
+      e._wormT -= dt;
+      if (e._wormState === 'hidden') {
+        // Bajo tierra — invisible hasta que el jugador se acerque
+        e.mesh.position.y = e._wormGroundY - 2.2;
+        if (dist < e.aggroRange) { e._wormState = 'emerging'; e._wormT = 1.0; }
+      } else if (e._wormState === 'emerging') {
+        const progress = Math.max(0, 1 - e._wormT);
+        e.mesh.position.y = (e._wormGroundY - 2.2) + progress * 2.2;
+        if (e._wormT <= 0) { e._wormState = 'surface'; e._wormT = 6 + Math.random() * 4; e.aggroed = true; }
+      } else if (e._wormState === 'surface') {
+        e.mesh.position.y += (e._wormGroundY - e.mesh.position.y) * Math.min(1, dt * 8);
+        // Oscilación ondulante
+        e.mesh.rotation.z = Math.sin(elapsed * 2.2 + e.phase) * 0.08;
+        if (e._wormT <= 0 && dist > e.aggroRange * 1.5) { e._wormState = 'submerging'; e._wormT = 1.0; e.aggroed = false; }
+      } else if (e._wormState === 'submerging') {
+        const progress = Math.max(0, 1 - e._wormT);
+        e.mesh.position.y = e._wormGroundY - progress * 2.2;
+        if (e._wormT <= 0) { e._wormState = 'hidden'; e._wormT = 3 + Math.random() * 4; }
+      }
     }
 
     // Ground snap — usa fixedY para el boss (sobre el techo), groundAt para el resto
-    const gY = (e.fixedY !== undefined) ? e.fixedY : groundAt(e.mesh.position.x, e.mesh.position.z);
-    e.mesh.position.y += (gY - e.mesh.position.y) * Math.min(1, dt * 12);
+    const gY = e._worm
+      ? e.mesh.position.y  // el gusano controla su propio Y
+      : (e.fixedY !== undefined) ? e.fixedY : groundAt(e.mesh.position.x, e.mesh.position.z);
+    if (!e._worm) e.mesh.position.y += (gY - e.mesh.position.y) * Math.min(1, dt * 12);
     const body = e.mesh.children[0]; // body sphere
 
     // Squash animado al recibir golpe (mejora #5)
@@ -4588,6 +5004,8 @@ function buildChunkMesh(cx, cz) {
   }
   // Trees
   _buildChunkTrees(cx, cz, chunk, offsetX, offsetZ);
+  // Biome enemies
+  spawnChunkEnemies(cx, cz);
 }
 
 function _buildChunkTrees(cx, cz, chunk, offsetX, offsetZ) {
