@@ -4771,6 +4771,8 @@ async function initGame() {
   generateMap();
   addTerrainCollider();
   addWallColliders();
+  // Inicializar chunk raíz ANTES de buildScene para que groundAt() funcione
+  chunkMap.set('0,0', { map: worldMap, hmap: heightMap, mesh: null, collider: null, trees: [], biome: 'home' });
   buildScene();
   spawnPlayer();
   // Sincronizar posición inicial del jugador con Rapier (+5m extra para que caiga sobre el suelo)
@@ -4818,8 +4820,6 @@ async function initGame() {
   rig.position.z = settled.z;
   rig.position.y = settled.y - CAPS_OFFSET;
 
-  // Inicializar chunk raíz en el mapa de chunks
-  chunkMap.set('0,0', { map: worldMap, hmap: heightMap, mesh: null, collider: null, trees: [], biome: 'home' });
   updateChunks();
 
   gameReady = true;
