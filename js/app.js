@@ -167,6 +167,10 @@ let _waterFrame    = 0;    // throttle de animación de agua
 let coinIM         = null; // InstancedMesh de monedas (30 → 1 draw call)
 let bossCoin       = null; // Moneda grande del boss (vale 5, Mesh propio)
 let dmgFlashEl     = null; // div de flash rojo al recibir daño
+let mazeObstacles  = [];   // obstáculos móviles del laberinto
+let mazeKey        = null; // llave del laberinto { mesh, wx, wz, collected }
+let hasKey         = false;
+let mazeDmgCooldown = 0;   // cooldown para daño de obstáculos del laberinto
 
 // Vectores temporales reutilizables — elimina allocations por frame en move()
 const _tmpQ  = new THREE.Quaternion();
@@ -2997,6 +3001,72 @@ renderer.setAnimationLoop(() => {
     }
   }
 
+  // ── Obstáculos del laberinto: mover + daño al jugador ────────
+  mazeDmgCooldown = Math.max(0, mazeDmgCooldown - dt);
+  for (const obs of mazeObstacles) {
+    let wx, wy, wz, qx = 0, qy = 0, qz = 0, qw = 1;
+
+    if (obs.type === 'updown') {
+      // Sube y baja entre y=0.5 y y=6 con período ~2.8s
+      const t = obs.phase + elapsed * 2.2;
+      wy = 3.0 + Math.sin(t) * 2.8;
+      wx = obs.cx; wz = obs.cz;
+      obs.mesh.position.set(wx, wy, wz);
+      // Daño si la piedra está baja y el jugador está debajo
+      const ddx = obs.cx - rig.position.x, ddz = obs.cz - rig.position.z;
+      if (wy < 2.5 && ddx * ddx + ddz * ddz < (obs.OBS_SZ + 1) * (obs.OBS_SZ + 1)) {
+        if (mazeDmgCooldown === 0) {
+          playerHP = Math.max(0, playerHP - 1); updateHPBar();
+          flashDamage(); mazeDmgCooldown = 1.2;
+          lastDamageTime = elapsed; regenTimer = 0;
+        }
+      }
+    } else {
+      // Brazo giratorio: gira en Y alrededor del centro
+      const angle = obs.phase + elapsed * 1.5;
+      wy = 2.8; wx = obs.cx; wz = obs.cz;
+      obs.mesh.position.set(wx, wy, wz);
+      obs.mesh.rotation.y = angle;
+      // Extremo del brazo: longitud = OBS_SZ * 1.4
+      const armX = wx + Math.cos(angle) * obs.OBS_SZ * 1.4;
+      const armZ = wz + Math.sin(angle) * obs.OBS_SZ * 1.4;
+      const adx = armX - rig.position.x, adz = armZ - rig.position.z;
+      if (adx * adx + adz * adz < (obs.OBS_SZ * 0.8) * (obs.OBS_SZ * 0.8)) {
+        if (mazeDmgCooldown === 0) {
+          playerHP = Math.max(0, playerHP - 1); updateHPBar();
+          flashDamage(); mazeDmgCooldown = 1.2;
+          lastDamageTime = elapsed; regenTimer = 0;
+        }
+      }
+      // Rapier sigue la rotación del brazo
+      const halfAngle = angle / 2;
+      qy = Math.sin(halfAngle); qw = Math.cos(halfAngle);
+    }
+
+    if (obs.rb && rapierWorld) {
+      obs.rb.setNextKinematicTranslation({ x: wx, y: wy, z: wz });
+      obs.rb.setNextKinematicRotation({ x: qx, y: qy, z: qz, w: qw });
+    }
+  }
+
+  // ── Llave del laberinto ───────────────────────────────────────
+  if (mazeKey && !mazeKey.collected) {
+    mazeKey.mesh.position.y = 1.8 + Math.sin(elapsed * 2.5) * 0.3;
+    mazeKey.mesh.rotation.y += dt * 1.4;
+    const kdx = mazeKey.wx - rig.position.x, kdz = mazeKey.wz - rig.position.z;
+    if (kdx * kdx + kdz * kdz < 3.5 * 3.5) {
+      mazeKey.collected = true; hasKey = true;
+      scene.remove(mazeKey.mesh);
+      sfx.starCollect();
+      // Mostrar mensaje
+      const el = document.getElementById('biome-indicator') || document.createElement('div');
+      const orig = el.textContent;
+      el.textContent = '🗝 ¡Llave encontrada!';
+      el.style.opacity = '1';
+      setTimeout(() => { el.textContent = orig; }, 2800);
+    }
+  }
+
   // Animate hearts + pickup
   for (let i = hearts.length - 1; i >= 0; i--) {
     const h = hearts[i];
@@ -3478,6 +3548,127 @@ function _makeSignTex() {
   return new THREE.CanvasTexture(c);
 }
 
+
+// ─────────────────────────────────────────────────────────────
+// LABERINTO DEL CASTILLO
+// Paredes de piedra, trampas móviles y una llave escondida
+// Interior del castillo: x∈[276,468], z∈[156,252], suelo y=0
+// Entrada sur: x∈[360,384] (tiles PATH 30-31), z=252
+// ─────────────────────────────────────────────────────────────
+function spawnCastleMaze() {
+  const WALL_H = 8.5;
+  const TH     = 1.5;   // half-thickness of walls
+  const BASE   = 0;     // castle floor y=0
+
+  function placeWall(cx, cz, hx, hz) {
+    const m = new THREE.Mesh(rockGeo, rockMat);
+    m.position.set(cx, BASE + WALL_H / 2, cz);
+    m.scale.set((hx * 2) / 0.68, WALL_H / 1.02, (hz * 2) / 0.68);
+    m.castShadow = m.receiveShadow = true;
+    scene.add(m);
+    if (rapierWorld)
+      rapierWorld.createCollider(
+        RAPIER.ColliderDesc.cuboid(hx, WALL_H / 2, hz)
+          .setTranslation(cx, BASE + WALL_H / 2, cz)
+      );
+  }
+
+  // ── Barrera B1 (z=216) — separa entrada sur del área media ──
+  // Gaps: x∈[348,372] (obstáculo A) y x∈[420,444] (obstáculo B)
+  placeWall(312, 216, 36, TH);   // x:276..348
+  placeWall(396, 216, 24, TH);   // x:372..420
+  placeWall(456, 216, 12, TH);   // x:444..468
+
+  // ── Barrera B2 (z=186) — separa área media del norte ────────
+  // Gaps: x∈[276,306] (paso oeste) y x∈[372,402] (paso este)
+  placeWall(333, 186, 27, TH);   // x:306..360
+  placeWall(429, 186, 27, TH);   // x:402..456
+  // extremo este abierto: x:456..468
+
+  // ── Muro norte parcial (crea corredor final hacia la llave) ──
+  placeWall(291, 168, 15, TH);   // x:276..306
+  placeWall(435, 168, 33, TH);   // x:402..468
+
+  // ── Divisores verticales — zona sur (z:216..252) ─────────────
+  placeWall(348, 234, TH, 18);   // x=348, z:216..252
+  placeWall(420, 240, TH, 12);   // x=420, z:228..252
+
+  // ── Divisores verticales — zona media (z:186..216) ───────────
+  placeWall(306, 201, TH, 15);   // x=306, z:186..216
+  placeWall(378, 204, TH, 12);   // x=378, z:192..216
+  placeWall(456, 204, TH, 12);   // x=456, z:192..216
+
+  // ── Divisores verticales — zona norte (z:156..186) ───────────
+  placeWall(330, 171, TH, 15);   // x=330, z:156..186
+  placeWall(414, 177, TH,  9);   // x=414, z:168..186
+
+  // ── Obstáculos móviles ───────────────────────────────────────
+  // Gap B1 oeste (x=360, z=216): piedra sube/baja
+  _addMazeObs(360, 216, 'updown', 0);
+  // Gap B1 este (x=432, z=216): piedra sube/baja, desfasada
+  _addMazeObs(432, 216, 'updown', Math.PI);
+  // Gap B2 oeste (x=291, z=186): brazo giratorio
+  _addMazeObs(291, 186, 'orbit', 0);
+  // Gap B2 este (x=387, z=186): brazo giratorio
+  _addMazeObs(387, 186, 'orbit', Math.PI * 0.65);
+
+  // ── Llave ────────────────────────────────────────────────────
+  // Escondida en el corredor norte, zona NE (x=366, z=162)
+  const kMat = new THREE.MeshLambertMaterial({
+    color: 0xffd700, emissive: 0xcc7700, emissiveIntensity: 0.7,
+  });
+  const kGroup = new THREE.Group();
+
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 2.2, 8), kMat);
+  shaft.rotation.z = Math.PI / 2;
+  kGroup.add(shaft);
+
+  const bow = new THREE.Mesh(new THREE.TorusGeometry(0.60, 0.20, 7, 12), kMat);
+  bow.position.x = -1.2; bow.rotation.x = Math.PI / 2;
+  kGroup.add(bow);
+
+  for (let i = 0; i < 3; i++) {
+    const tooth = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.38, 0.18), kMat);
+    tooth.position.set(0.1 + i * 0.5, -0.42, 0);
+    kGroup.add(tooth);
+  }
+
+  kGroup.position.set(366, 1.8, 162);
+  kGroup.scale.setScalar(2.2);
+  scene.add(kGroup);
+  mazeKey = { mesh: kGroup, wx: 366, wz: 162, collected: false };
+}
+
+function _addMazeObs(cx, cz, type, phase) {
+  const OBS_SZ = 4.8;  // metros de lado del bloque
+  const mat = new THREE.MeshLambertMaterial({ color: 0x5c3a1e, flatShading: true });
+
+  let mesh;
+  if (type === 'orbit') {
+    // Brazo largo que gira horizontalmente
+    mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(OBS_SZ * 2.8, OBS_SZ * 0.7, OBS_SZ * 0.7),
+      mat
+    );
+  } else {
+    mesh = new THREE.Mesh(rockGeo, mat);
+    mesh.scale.setScalar(OBS_SZ / 0.68);
+  }
+  mesh.castShadow = true;
+  scene.add(mesh);
+
+  let rb = null;
+  if (rapierWorld) {
+    const rbd = RAPIER.RigidBodyDesc.kinematicPositionBased();
+    rb = rapierWorld.createRigidBody(rbd);
+    const hx = type === 'orbit' ? OBS_SZ * 1.4 : OBS_SZ / 2;
+    const hy = type === 'orbit' ? OBS_SZ * 0.35 : OBS_SZ / 2;
+    const hz = type === 'orbit' ? OBS_SZ * 0.35 : OBS_SZ / 2;
+    rapierWorld.createCollider(RAPIER.ColliderDesc.cuboid(hx, hy, hz), rb);
+  }
+
+  mazeObstacles.push({ mesh, rb, type, cx, cz, phase, OBS_SZ });
+}
 
 // ─────────────────────────────────────────────────────────────
 // TECHO DE ROCA DEL CASTILLO
@@ -4173,6 +4364,7 @@ async function initGame() {
   spawnVillage();
   spawnCastleTowers();
   spawnCastleRoof();
+  spawnCastleMaze();
   spawnBossSlime();
   spawnSpiralStairs();
   spawnBridge();
