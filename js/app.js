@@ -176,8 +176,9 @@ let doorMsgCooldown = 0;  // evita spam del mensaje "necesitas la llave"
 
 // ── Sistema de chunks — mundo infinito ──────────────────────
 const chunkMap = new Map(); // "cx,cz" → {map, hmap, mesh, collider, trees, biome}
-const CHUNK_R  = 2;         // radio de carga (chunks)
+const CHUNK_R  = 1;         // radio de carga (chunks) — 3×3=9; fog limita visión a ~200m
 let  _chunkTick = 0;        // throttle
+const _chunkBuildQ = [];    // cola asíncrona: construir 1 chunk por frame
 
 // Vectores temporales reutilizables — elimina allocations por frame en move()
 const _tmpQ  = new THREE.Quaternion();
@@ -2938,9 +2939,16 @@ renderer.setAnimationLoop(() => {
     rapierWorld.step();
   }
 
+  // Procesar 1 chunk de la cola por frame — evita freeze en hilo principal
+  if (_chunkBuildQ.length > 0) {
+    const item = _chunkBuildQ.shift();
+    const ch = chunkMap.get(item.key);
+    if (ch && !ch.mesh) buildChunkMesh(item.cx, item.cz);
+  }
+
   if (!gameEnded) {
     move(dt);
-    if (++_chunkTick % 30 === 0) updateChunks(); // verificar chunks cada 30 frames
+    if (++_chunkTick % 45 === 0) updateChunks(); // verificar chunks cada 45 frames
     updateEnemies(dt);
     updatePushRocks(dt);
     updateDragons(dt);
@@ -4299,7 +4307,7 @@ function _chunkBiome(cx, cz) {
 
 // ── Erosión hidráulica — simula gotas de lluvia sobre el heightmap ────────
 function _hydraulicErosion(hmap, map, W) {
-  const DROPS = 280, STEPS = 80;
+  const DROPS = 90, STEPS = 55;
   const INERTIA = 0.08, DEPOSIT = 0.32, ERODE = 0.26, EVAP = 0.018;
   for (let d = 0; d < DROPS; d++) {
     let px = 1 + Math.random() * (W - 3);
@@ -4479,7 +4487,7 @@ function _buildChunkTrees(cx, cz, chunk, offsetX, offsetZ) {
     const parts = treePartsList[mi][1];
     for (const {geo,mat} of parts) {
       const im = new THREE.InstancedMesh(geo, mat, list.length);
-      im.castShadow = true;
+      // Sin sombras en árboles de chunks — demasiado caro con miles de instancias
       const td = new THREE.Object3D();
       list.forEach(([lx,lz],i) => {
         const wx = offsetX+lx*TILE, wz = offsetZ+lz*TILE;
@@ -4515,14 +4523,23 @@ function updateChunks() {
         ? {map:worldMap,hmap:heightMap,mesh:null,collider:null,trees:[],biome:'home'}
         : generateChunkData(cx,cz));
     }
-    // Construir mesh si aún no existe (puede estar pre-generado sin mesh)
-    if (!chunkMap.get(key).mesh) buildChunkMesh(cx,cz);
+    // Encolar si aún no tiene mesh y no está ya en la cola
+    const ch = chunkMap.get(key);
+    if (!ch.mesh && !_chunkBuildQ.find(q=>q.key===key)) {
+      _chunkBuildQ.push({ key, cx, cz, dist: Math.abs(dcx)+Math.abs(dcz) });
+    }
   }
+  // Ordenar por distancia al jugador (los más cercanos primero)
+  _chunkBuildQ.sort((a,b)=>a.dist-b.dist);
   // Unload far chunks
   for (const key of [...chunkMap.keys()]) {
     const [cx,cz]=key.split(',').map(Number);
     if (cx===0&&cz===0) continue;
-    if (Math.abs(cx-pcx)>CHUNK_R+1||Math.abs(cz-pcz)>CHUNK_R+1) unloadChunk(cx,cz);
+    if (Math.abs(cx-pcx)>CHUNK_R+1||Math.abs(cz-pcz)>CHUNK_R+1) {
+      const qi=_chunkBuildQ.findIndex(q=>q.key===key);
+      if (qi>=0) _chunkBuildQ.splice(qi,1);
+      unloadChunk(cx,cz);
+    }
   }
 }
 
