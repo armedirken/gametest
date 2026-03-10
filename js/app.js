@@ -3524,7 +3524,7 @@ function spawnBossSlime() {
       .setTranslation(bx, bossFloorY, bz);
     bossRBody = rapierWorld.createRigidBody(rbDesc);
     rapierWorld.createCollider(
-      RAPIER.ColliderDesc.cylinder(bodyH, bodyR * 0.82)
+      RAPIER.ColliderDesc.cylinder(bodyH * 1.1, bodyR * 1.05)
         .setTranslation(0, 0.3 * SC, 0),  // centrado en el cuerpo (offset local)
       bossRBody
     );
