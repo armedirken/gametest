@@ -413,7 +413,7 @@ function generateMap() {
       if (t === T.FOREST && !nearTower) {
         for (let ti = 0; ti < treeOffsets.length; ti++) {
           const tk = key + '_' + ti;
-          if (!_occupied.has(tk) && hash(x + ti * 7, z + ti * 11, worldSeed + 1 + ti * 50) > 0.05) {
+          if (!_occupied.has(tk) && hash(x + ti * 7, z + ti * 11, worldSeed + 1 + ti * 50) > 0.36) {
             treeLists[0].push([x + treeOffsets[ti][0], z + treeOffsets[ti][1]]);
             _occupied.add(tk);
           }
@@ -425,7 +425,7 @@ function generateMap() {
         const nearWater = [[z-1,x],[z+1,x],[z,x-1],[z,x+1]].some(
           ([nz,nx]) => nz>=0&&nz<WORLD&&nx>=0&&nx<WORLD &&
                        (worldMap[nz][nx]===T.WATER||worldMap[nz][nx]===T.DEEP));
-        const thr = nearWater ? 0.30 : 0.45;
+        const thr = nearWater ? 0.51 : 0.62;
         for (let ti = 0; ti < treeOffsets.length; ti++) {
           if (hash(x + ti * 9, z + ti * 13, worldSeed + 11 + ti * 50) > thr) {
             treeLists[1].push([x + treeOffsets[ti][0], z + treeOffsets[ti][1]]);
@@ -437,7 +437,7 @@ function generateMap() {
       // Montaña — 3 árboles por tile
       if (t === T.MOUND && !_occupied.has(key) && !nearTower) {
         for (let ti = 0; ti < 3; ti++) {
-          if (hash(x + ti * 5, z + ti * 7, worldSeed + 21 + ti * 50) > 0.20) {
+          if (hash(x + ti * 5, z + ti * 7, worldSeed + 21 + ti * 50) > 0.44) {
             treeLists[0].push([x + treeOffsets[ti][0], z + treeOffsets[ti][1]]);
           }
         }
@@ -5220,19 +5220,19 @@ function _buildChunkTrees(cx, cz, chunk, offsetX, offsetZ) {
     const gx = cx*WORLD+x, gz = cz*WORLD+z;
     if (t === T.FOREST && !isPalmBiome) {
       for (let ti=0;ti<4;ti++)
-        if (hash(gx*3+ti*13,gz*3+ti*17,worldSeed+33+ti*7)>0.12)
+        if (hash(gx*3+ti*13,gz*3+ti*17,worldSeed+33+ti*7)>0.38)
           forestList.push([x+offs[ti][0], z+offs[ti][1]]);
-    } else if (t === T.MOUND && h > 20 && hash(gx,gz,worldSeed+21)>0.30) {
+    } else if (t === T.MOUND && h > 20 && hash(gx,gz,worldSeed+21)>0.51) {
       // Árboles nevados en montañas altas
       for (let ti=0;ti<2;ti++)
-        if (hash(gx*3+ti*13,gz*3+ti*17,worldSeed+77+ti*7)>0.22)
+        if (hash(gx*3+ti*13,gz*3+ti*17,worldSeed+77+ti*7)>0.46)
           snowList.push([x+offs[ti][0], z+offs[ti][1]]);
-    } else if (t === T.GRASS && !isPalmBiome && hash(gx,gz,worldSeed+44)>0.60) {
+    } else if (t === T.GRASS && !isPalmBiome && hash(gx,gz,worldSeed+44)>0.72) {
       grassList.push([x+0.5, z+0.5]);
-    } else if (t === T.SAND && !isPalmBiome && hash(gx,gz,worldSeed+88)>0.83) {
+    } else if (t === T.SAND && !isPalmBiome && hash(gx,gz,worldSeed+88)>0.88) {
       // Cactus en desierto (poco densos)
       cactusList.push([x+0.5, z+0.5]);
-    } else if ((t === T.SAND || t === T.GRASS || t === T.FOREST) && isPalmBiome && hash(gx,gz,worldSeed+99)>0.82) {
+    } else if ((t === T.SAND || t === T.GRASS || t === T.FOREST) && isPalmBiome && hash(gx,gz,worldSeed+99)>0.87) {
       // Palmeras en playas tropicales e islas
       palmList.push([x+0.5, z+0.5]);
     }
