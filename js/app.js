@@ -186,9 +186,10 @@ const _tmpV3 = new THREE.Vector3();
 const coinDummy = new THREE.Object3D(); // reutilizado para actualizar coinIM
 let treeLists = [[], [], []];  // [forestList, fieldList, mountainList]
 const treePartsList = [
-  [_buildTreeParts(42,0), _buildTreeParts(42,1), _buildTreeParts(42,2)],  // bosque+montaña
-  [_buildTreeParts(97,0), _buildTreeParts(97,1), _buildTreeParts(97,2)],  // pradera
-  null,
+  [_buildTreeParts(42,0), _buildTreeParts(42,1), _buildTreeParts(42,2)],      // bosque
+  [_buildTreeParts(97,0), _buildTreeParts(97,1), _buildTreeParts(97,2)],      // pradera
+  [_buildSnowTreeParts(13,0), _buildSnowTreeParts(13,1), _buildSnowTreeParts(13,2)], // montaña nevada
+  [_buildCactusParts(7), _buildCactusParts(23), _buildCactusParts(41)],       // desierto
 ];
 
 // Fill a rectangular region with tile type t
@@ -4264,6 +4265,14 @@ function _globalTile(gx, gz, h) {
   const swW   = Math.max(0, Math.min(1, (swN - 0.66) / 0.16));
   const frstN = fbm(gx / 22, gz / 22, 2, worldSeed + 666);
 
+  // Lagos: cuencas bajas con ruido de baja frecuencia
+  const lakeN = fbm(gx / 32, gz / 32, 2, worldSeed + 888);
+  if (lakeN < 0.22 && h < 13 && dW < 0.2) return T.WATER;
+
+  // Ríos: bandas estrechas serpenteantes en tierra baja
+  const riverN = fbm(gx / 30, gz / 30, 3, worldSeed + 777);
+  if (Math.abs(riverN - 0.50) < 0.020 && h < 20 && dW < 0.15) return T.WATER;
+
   if (h < 0.4 || nF < 0.055) return T.WATER;
   if (h > 30)  return T.MOUND;
   if (dW > 0.35)              return T.SAND;
@@ -4432,21 +4441,40 @@ function buildChunkMesh(cx, cz) {
 }
 
 function _buildChunkTrees(cx, cz, chunk, offsetX, offsetZ) {
-  const forestList=[], grassList=[];
+  // Chunk 0,0 ya tiene árboles colocados en buildScene — evitar duplicados
+  if (cx === 0 && cz === 0) return;
+
+  const forestList=[], grassList=[], snowList=[], cactusList=[];
   const offs = [[0.15,0.15],[0.6,0.2],[0.25,0.65],[-0.1,0.45]];
   for (let z=0;z<WORLD;z++) for (let x=0;x<WORLD;x++) {
-    const t=chunk.map[z][x];
-    const gx=cx*WORLD+x, gz=cz*WORLD+z;
-    if (t===T.FOREST||(t===T.MOUND&&hash(gx,gz,worldSeed+21)>0.45)) {
-      for (let ti=0;ti<4;ti++) {
+    const t  = chunk.map[z][x];
+    const h  = chunk.hmap[z][x];
+    const gx = cx*WORLD+x, gz = cz*WORLD+z;
+    if (t === T.FOREST) {
+      for (let ti=0;ti<4;ti++)
         if (hash(gx*3+ti*13,gz*3+ti*17,worldSeed+33+ti*7)>0.12)
           forestList.push([x+offs[ti][0], z+offs[ti][1]]);
-      }
-    } else if (t===T.GRASS && hash(gx,gz,worldSeed+44)>0.60) {
-      grassList.push([x+0.5,z+0.5]);
+    } else if (t === T.MOUND && h > 20 && hash(gx,gz,worldSeed+21)>0.30) {
+      // Árboles nevados en montañas altas
+      for (let ti=0;ti<2;ti++)
+        if (hash(gx*3+ti*13,gz*3+ti*17,worldSeed+77+ti*7)>0.22)
+          snowList.push([x+offs[ti][0], z+offs[ti][1]]);
+    } else if (t === T.GRASS && hash(gx,gz,worldSeed+44)>0.60) {
+      grassList.push([x+0.5, z+0.5]);
+    } else if (t === T.SAND && hash(gx,gz,worldSeed+88)>0.83) {
+      // Cactus en desierto (poco densos)
+      cactusList.push([x+0.5, z+0.5]);
     }
   }
-  for (const [list,mi] of [[forestList,0],[grassList,1]]) {
+
+  // [lista, índice treePartsList, escala base, rango escala]
+  const groups = [
+    [forestList, 0, 3.2, 3.5],
+    [grassList,  1, 2.5, 2.0],
+    [snowList,   2, 3.0, 3.0],
+    [cactusList, 3, 1.4, 1.0],
+  ];
+  for (const [list, mi, scBase, scRange] of groups) {
     if (!list.length || !treePartsList[mi]) continue;
     const parts = treePartsList[mi][1];
     for (const {geo,mat} of parts) {
@@ -4454,11 +4482,11 @@ function _buildChunkTrees(cx, cz, chunk, offsetX, offsetZ) {
       im.castShadow = true;
       const td = new THREE.Object3D();
       list.forEach(([lx,lz],i) => {
-        const wx=offsetX+lx*TILE, wz=offsetZ+lz*TILE;
-        const gy=groundAt(wx,wz);
-        const sc=3.2+hash(cx*WORLD+Math.floor(lx),cz*WORLD+Math.floor(lz),worldSeed+55)*3.5;
+        const wx = offsetX+lx*TILE, wz = offsetZ+lz*TILE;
+        const gy = groundAt(wx,wz);
+        const sc = scBase + hash(cx*WORLD+Math.floor(lx), cz*WORLD+Math.floor(lz), worldSeed+55) * scRange;
         td.position.set(wx,gy,wz); td.scale.setScalar(sc);
-        td.rotation.y=hash(cx*WORLD+Math.floor(lx),cz*WORLD+Math.floor(lz),worldSeed+66)*Math.PI*2;
+        td.rotation.y = hash(cx*WORLD+Math.floor(lx), cz*WORLD+Math.floor(lz), worldSeed+66) * Math.PI*2;
         td.updateMatrix(); im.setMatrixAt(i,td.matrix);
       });
       im.instanceMatrix.needsUpdate=true; scene.add(im); chunk.trees.push(im);
@@ -4895,6 +4923,76 @@ function _makeRockGeo(seed) {
   pos.needsUpdate = true;
   geo.computeVertexNormals();
   return geo;
+}
+
+function _buildSnowTreeParts(seed, sizeClass = 1) {
+  // Árbol nevado: copa oscura abajo, blanca/nevada arriba
+  const trunkColors = [0x7a5530, 0x5a3518, 0x3d2010];
+  const trunkMat = new THREE.MeshLambertMaterial({ color: trunkColors[sizeClass], flatShading: true });
+  const leafMat  = new THREE.MeshLambertMaterial({ color: 0x1a4c1a, flatShading: true });
+  const snowMat  = new THREE.MeshLambertMaterial({ color: 0xddeeff, flatShading: true });
+
+  const trR  = [0.02, 0.03, 0.05][sizeClass];
+  const trRB = [0.05, 0.09, 0.14][sizeClass];
+  const trH  = [0.30, 0.45, 0.62][sizeClass];
+  const trunkGeo = new THREE.CylinderGeometry(trR, trRB, trH, 5, 1);
+  trunkGeo.translate(0, trH / 2, 0);
+
+  const tierMin   = [2, 3, 4][sizeClass];
+  const tierExtra = [1, 2, 2][sizeClass];
+  const tiers = tierMin + Math.floor(hash(seed, 0, 1) * tierExtra);
+  const rBase = [0.28, 0.44, 0.60][sizeClass];
+  const rTop  = [0.07, 0.14, 0.22][sizeClass];
+
+  const greenParts = [], snowParts = [];
+  let ex = 0, ez = 0;
+  for (let i = 0; i < tiers; i++) {
+    const t   = i / tiers;
+    const r   = rBase - t * (rBase - rTop);
+    const h   = 0.36 + (hash(seed, i, 2) - 0.5) * 0.10;
+    const y   = 0.32 + i * 0.22;
+    const rot = i * Math.PI * 2 * 0.618;
+    const seg = 5 + (i & 1);
+    ex += (hash(seed, i, 14) - 0.5) * 0.04;
+    ez += (hash(seed, i, 15) - 0.5) * 0.04;
+    const cone = new THREE.ConeGeometry(r, h, seg, 1);
+    cone.rotateY(rot);
+    cone.translate(ex, y + h * 0.5, ez);
+    if (i >= Math.floor(tiers * 0.5)) snowParts.push(cone);
+    else greenParts.push(cone);
+  }
+  const result = [{ geo: trunkGeo, mat: trunkMat }];
+  if (greenParts.length) result.push({ geo: mergeGeometries(greenParts), mat: leafMat });
+  if (snowParts.length)  result.push({ geo: mergeGeometries(snowParts),  mat: snowMat });
+  return result;
+}
+
+function _buildCactusParts(seed) {
+  const mat = new THREE.MeshLambertMaterial({ color: 0x4a9a4a, flatShading: true });
+  const trunkH = 0.6 + hash(seed, 1, 3) * 0.5; // 0.6 – 1.1
+
+  // Tronco vertical
+  const trunkGeo = new THREE.CylinderGeometry(0.07, 0.09, trunkH, 6, 1);
+  trunkGeo.translate(0, trunkH / 2, 0);
+
+  // Dos brazos: segmento horizontal + segmento vertical
+  const armParts = [];
+  for (let side = -1; side <= 1; side += 2) {
+    const armLen = 0.22 + hash(seed, side + 5, 2) * 0.18;
+    const armY   = trunkH * (0.38 + hash(seed, side + 3, 4) * 0.28);
+    const vH     = trunkH * 0.38;
+    // Horizontal
+    const hArm = new THREE.CylinderGeometry(0.05, 0.06, armLen, 5, 1);
+    hArm.rotateZ(Math.PI / 2);
+    hArm.translate(side * armLen / 2, armY, 0);
+    armParts.push(hArm);
+    // Vertical (extremo del brazo)
+    const vArm = new THREE.CylinderGeometry(0.04, 0.05, vH, 5, 1);
+    vArm.translate(side * armLen, armY + vH / 2, 0);
+    armParts.push(vArm);
+  }
+  const armsGeo = mergeGeometries(armParts);
+  return [{ geo: trunkGeo, mat }, { geo: armsGeo, mat }];
 }
 
 // ─────────────────────────────────────────────────────────────
