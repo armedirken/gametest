@@ -526,7 +526,7 @@ function placeDungeons() {
 // ─────────────────────────────────────────────────────────────
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(COLOR.SKY);
-scene.fog        = new THREE.FogExp2(0x9ec8e8, 0.0018); // niebla suave — mundo infinito
+scene.fog        = new THREE.FogExp2(0x9ec8e8, 0.007);  // niebla atmosférica — efecto enormidad
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
