@@ -1848,6 +1848,11 @@ function updateEnemies(dt) {
         const spd = (e.chaseSpeed ?? 2.2) * dt;
         e.mesh.position.x += dx / dist * spd;
         e.mesh.position.z += dz / dist * spd;
+        // Boss se queda en el techo (DFLOOR del castillo)
+        if (e._bossScale) {
+          e.mesh.position.x = Math.max(23*TILE+6, Math.min(38*TILE+6, e.mesh.position.x));
+          e.mesh.position.z = Math.max(13*TILE+6, Math.min(20*TILE+6, e.mesh.position.z));
+        }
         faceToward(px, pz);
         e.mesh.rotation.x = 0; e.mesh.rotation.z = 0;
         body.position.y = 0.3 + Math.abs(Math.sin(elapsed * 9 + e.phase)) * 0.09;
@@ -1877,14 +1882,20 @@ function updateEnemies(dt) {
           }
 
         } else if (e.lungePhase === 'lunge') {
-          // Dash forward — salta a la altura del jugador para poder golpearlo
+          // Dash forward
           e.mesh.rotation.x = -0.28;
           body.position.y = 0.3;
-          const targetY = rig.position.y + EYE * 0.55; // pecho del jugador
-          e.mesh.position.y += (targetY - e.mesh.position.y) * Math.min(1, 12 * dt);
+          // Boss mantiene su altura (fixedY), no persigue al jugador verticalmente
+          if (!e._bossScale) {
+            const targetY = rig.position.y + EYE * 0.55;
+            e.mesh.position.y += (targetY - e.mesh.position.y) * Math.min(1, 12 * dt);
+          }
           const newX = e.mesh.position.x + e.lungeDir.x * (e.lungeSpeed ?? 7) * dt;
           const newZ = e.mesh.position.z + e.lungeDir.z * (e.lungeSpeed ?? 7) * dt;
-          if (tileAt(newX, newZ) !== T.DEEP) {
+          const canMove = e._bossScale
+            ? (worldMap[Math.floor(newZ/TILE)]?.[Math.floor(newX/TILE)] === T.DFLOOR)
+            : (tileAt(newX, newZ) !== T.DEEP);
+          if (canMove) {
             e.mesh.position.x = newX;
             e.mesh.position.z = newZ;
           }
@@ -1972,7 +1983,10 @@ function updateEnemies(dt) {
     e.hitCooldown = Math.max(0, e.hitCooldown - dt);
     if (hasSword && e.hitCooldown === 0) {
       const tipDist = swordTipWorld.distanceTo(e.mesh.position);
-      if (tipDist < (e.swordHitRange ?? 1.2) && swordVel > 1.5) {
+      // Para el boss: verificar que la espada esté a su altura (evita golpear desde abajo del techo)
+      const tipYOk = !e._bossScale ||
+        Math.abs(swordTipWorld.y - (e.mesh.position.y + 0.3 * e._bossScale)) < 14;
+      if (tipDist < (e.swordHitRange ?? 1.2) && swordVel > 1.5 && tipYOk) {
         e.hp--; e.hitCooldown = 0.4; sfx.hit();
         e.hitFlashT = 0.20; // timer-based (no setTimeout)
         e.squashT   = 0.12; // squash visual
