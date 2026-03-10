@@ -99,6 +99,7 @@ const NPC_DEFS = [
   { tx:26, tz:34, name:'Maga',     color:0xcc88ff, questId:2 }, // SW
   { tx:27, tz:32, name:'Mercader', color:0xffcc66, questId:3 }, // NW
   { tx:28, tz:32, name:'Ermitaño', color:0x99ffcc, questId:4 }, // NE
+  { tx:26, tz:33, name:'Alcalde',  color:0xffd700, questId:5 }, // O — alcalde da misión del boss
 ];
 const QUEST_DEFS = [
   { id:0, title:'Las Monedas Perdidas',    desc:'Recoge 30 monedas doradas\nesparcidas por el mundo.',   goal:30, type:'coins',   reward:'un amuleto de suerte' },
@@ -106,6 +107,7 @@ const QUEST_DEFS = [
   { id:2, title:'Las Cuatro Torres',       desc:'Visita las 4 torres\nde piedra del mundo.',             goal:4,  type:'towers',  reward:'un libro de hechizos' },
   { id:3, title:'El Gran Explorador',      desc:'Llega al interior\nde la Ciudadela Eryndell.',          goal:1,  type:'castle',  reward:'una bolsa de monedas' },
   { id:4, title:'El Último Superviviente', desc:'Sobrevive 60 segundos\ncon enemigos cerca.',            goal:60, type:'survive', reward:'el escudo legendario' },
+  { id:5, title:'El Señor del Castillo',   desc:'Sube al techo del castillo\ny derrota al Slime Gigante.', goal:1, type:'boss', reward:'la Gran Moneda del Boss' },
 ];
 let activeQuestId   = -1;
 let questProgress   = 0;
@@ -163,6 +165,7 @@ let coinsCollected = 0;    // monedas recogidas (evita filter() por frame)
 let enemiesKilled  = 0;    // para pantalla de victoria
 let _waterFrame    = 0;    // throttle de animación de agua
 let coinIM         = null; // InstancedMesh de monedas (30 → 1 draw call)
+let bossCoin       = null; // Moneda grande del boss (vale 5, Mesh propio)
 let dmgFlashEl     = null; // div de flash rojo al recibir daño
 
 // Vectores temporales reutilizables — elimina allocations por frame en move()
@@ -1976,7 +1979,8 @@ function updateEnemies(dt) {
         if (e.hp <= 0) {
           e.dead = true; sfx.death(); enemiesKilled++;
           spawnDeathParticles(e.mesh.position);
-          onEnemyKilled();
+          if (e._bossScale) spawnBossCoin(e.mesh.position);
+          onEnemyKilled(e);
         }
       }
     }
@@ -1987,18 +1991,23 @@ function updateEnemies(dt) {
       if (e.hp <= 0) {
         e.dead = true; sfx.death(); enemiesKilled++;
         spawnDeathParticles(e.mesh.position);
-        onEnemyKilled();
+        if (e._bossScale) spawnBossCoin(e.mesh.position);
+        onEnemyKilled(e);
       }
     }
   }
 }
 
-function onEnemyKilled() {
-  // Quest kills
+function onEnemyKilled(e) {
+  // Quest kills (slimes normales)
   if (activeQuestId === 1) {
     questProgress = enemiesKilled;
     updateQuestHUD();
     if (enemiesKilled >= 5) { questComplete = true; updateQuestHUD(); }
+  }
+  // Quest boss
+  if (activeQuestId === 5 && e._bossScale) {
+    questProgress = 1; questComplete = true; updateQuestHUD();
   }
   // Combo (mejora #15)
   comboTimer = 3.0;
@@ -2008,6 +2017,17 @@ function onEnemyKilled() {
     comboEl.style.display = 'block';
     comboEl.style.opacity = '1';
   }
+}
+
+function spawnBossCoin(pos) {
+  const geo = new THREE.CylinderGeometry(2.0, 2.0, 0.55, 16);
+  const mat = new THREE.MeshLambertMaterial({ color: 0xffd700, emissive: 0xff8800, emissiveIntensity: 0.9 });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.castShadow = true;
+  const baseY = pos.y + 3.0;
+  mesh.position.set(pos.x, baseY, pos.z);
+  scene.add(mesh);
+  bossCoin = { wx: pos.x, wz: pos.z, baseY, collected: false, rising: false, riseT: 0, worth: 5, mesh };
 }
 
 function spawnDeathParticles(pos) {
@@ -2952,6 +2972,29 @@ renderer.setAnimationLoop(() => {
     }
     // Only flag needsUpdate when coins actually changed (optimización Part 3)
     if (coinChanged) coinIM.instanceMatrix.needsUpdate = true;
+  }
+
+  // Gran Moneda del Boss — animación flotante y recogida
+  if (bossCoin && !bossCoin.collected) {
+    const bc = bossCoin;
+    if (bc.rising) {
+      bc.riseT += dt;
+      const prog = Math.min(bc.riseT / 0.55, 1);
+      bc.mesh.position.set(bc.wx, bc.baseY + prog * 2.5, bc.wz);
+      bc.mesh.scale.setScalar(1 - prog * 0.9);
+      bc.mesh.rotation.y += dt * 3;
+      if (prog >= 1) { bc.collected = true; scene.remove(bc.mesh); }
+    } else {
+      bc.mesh.position.set(bc.wx, bc.baseY + Math.sin(elapsed * 2) * 0.4, bc.wz);
+      bc.mesh.rotation.y += dt * 1.8;
+      const bdx = bc.wx - rig.position.x, bdz = bc.wz - rig.position.z;
+      if (bdx * bdx + bdz * bdz < 4.0 * 4.0) {
+        bc.rising = true; bc.riseT = 0;
+        coinsCollected += bc.worth;
+        sfx.starCollect();
+        updateStarCounter();
+      }
+    }
   }
 
   // Animate hearts + pickup
