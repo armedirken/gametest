@@ -641,29 +641,30 @@ function buildScene() {
   terrainMesh.receiveShadow = true;
   scene.add(terrainMesh);
 
-  // ── Water surface — shader realista con Fresnel + specular + shimmer ──
+  // ── Water surface — shader realista con olas geométricas + normales per-pixel ──
   {
+    // Malla densa y cercana: 1600m × 1600m, 130×130 vértices → quad ~12m (= TILE)
+    // Las olas geométricas son visibles de cerca; el fog oculta el borde
     const _wVert = `
       uniform float uTime;
       varying vec3 vWorldPos;
       varying vec3 vWorldNormal;
       void main() {
         vec3 pos = position;
-        // 4 capas de ondas superpuestas
-        float w1 = sin(pos.x * 0.12 + uTime * 1.50) * 0.18;
-        float w2 = cos(pos.y * 0.09 + uTime * 1.10) * 0.13;
-        float w3 = sin((pos.x + pos.y) * 0.06 + uTime * 0.80) * 0.09;
-        float w4 = cos((pos.x - pos.y) * 0.05 + uTime * 1.30) * 0.06;
+        // Olas grandes (escala geométrica) — amplitud aumentada para que se vean
+        float w1 = sin(pos.x * 0.10 + uTime * 1.20) * 0.70;
+        float w2 = cos(pos.y * 0.08 + uTime * 0.90) * 0.50;
+        float w3 = sin((pos.x + pos.y) * 0.055 + uTime * 0.70) * 0.35;
+        float w4 = cos((pos.x - pos.y) * 0.045 + uTime * 1.10) * 0.22;
         pos.z += w1 + w2 + w3 + w4;
-        // Derivadas parciales para la normal
-        float dx = cos(pos.x * 0.12 + uTime * 1.50) * 0.12 * 0.18
-                 + cos((pos.x + pos.y) * 0.06 + uTime * 0.80) * 0.06 * 0.09
-                 - sin((pos.x - pos.y) * 0.05 + uTime * 1.30) * 0.05 * 0.06;
-        float dy = -sin(pos.y * 0.09 + uTime * 1.10) * 0.09 * 0.13
-                 + cos((pos.x + pos.y) * 0.06 + uTime * 0.80) * 0.06 * 0.09
-                 + sin((pos.x - pos.y) * 0.05 + uTime * 1.30) * 0.05 * 0.06;
-        vec3 localNormal = normalize(vec3(-dx, -dy, 1.0));
-        vWorldNormal = normalize(mat3(modelMatrix) * localNormal);
+        // Derivadas para normal de vértice
+        float dx = cos(pos.x * 0.10 + uTime * 1.20) * 0.10 * 0.70
+                 + cos((pos.x + pos.y) * 0.055 + uTime * 0.70) * 0.055 * 0.35
+                 - sin((pos.x - pos.y) * 0.045 + uTime * 1.10) * 0.045 * 0.22;
+        float dy = -sin(pos.y * 0.08 + uTime * 0.90) * 0.08 * 0.50
+                 + cos((pos.x + pos.y) * 0.055 + uTime * 0.70) * 0.055 * 0.35
+                 + sin((pos.x - pos.y) * 0.045 + uTime * 1.10) * 0.045 * 0.22;
+        vWorldNormal = normalize(mat3(modelMatrix) * normalize(vec3(-dx, -dy, 1.0)));
         vec4 worldPos = modelMatrix * vec4(pos, 1.0);
         vWorldPos = worldPos.xyz;
         gl_Position = projectionMatrix * viewMatrix * worldPos;
@@ -675,30 +676,52 @@ function buildScene() {
       uniform vec3  uFogColor;
       varying vec3 vWorldPos;
       varying vec3 vWorldNormal;
+
+      // Normal per-pixel de micro-ondas (alta frecuencia, sin coste geométrico)
+      vec3 microNormal() {
+        float mx = cos(vWorldPos.x*0.55 + uTime*2.10)*0.55*0.18
+                 + cos((vWorldPos.x-vWorldPos.z)*0.38 + uTime*2.60)*0.38*0.12;
+        float mz = cos(vWorldPos.z*0.44 + uTime*1.80)*0.44*0.20
+                 + sin((vWorldPos.x+vWorldPos.z)*0.32 + uTime*1.50)*0.32*0.15;
+        return normalize(vec3(-mx, 1.0, -mz));
+      }
+
       void main() {
         vec3 viewDir = normalize(cameraPosition - vWorldPos);
-        float NdotV  = max(dot(vWorldNormal, viewDir), 0.0);
-        float fresnel = pow(1.0 - NdotV, 2.5);
-        // Color profundidad
-        vec3 deep    = vec3(0.04, 0.14, 0.40);
-        vec3 shallow = vec3(0.10, 0.54, 0.72);
-        vec3 col     = mix(deep, shallow, fresnel * 0.55 + 0.10);
-        // Specular solar (Blinn-Phong)
+        float dist   = length(vWorldPos - cameraPosition);
+
+        // Mezcla normal de vértice (olas grandes) con micro-normal (detalle cercano)
+        float microW = 1.0 - smoothstep(8.0, 60.0, dist);
+        vec3  N      = normalize(mix(vWorldNormal, microNormal(), microW * 0.65));
+
+        float NdotV  = max(dot(N, viewDir), 0.0);
+        float fresnel = pow(1.0 - NdotV, 2.2);
+
+        // Color por profundidad / ángulo
+        vec3 deep    = vec3(0.03, 0.12, 0.38);
+        vec3 shallow = vec3(0.08, 0.52, 0.70);
+        vec3 col     = mix(deep, shallow, fresnel * 0.55 + 0.12);
+
+        // Specular solar
         vec3 halfV = normalize(uSunDir + viewDir);
-        float spec = pow(max(dot(vWorldNormal, halfV), 0.0), 90.0);
-        col += vec3(1.0, 0.97, 0.88) * spec * 0.85;
-        // Shimmer animado tipo cáusticas
-        float s1 = sin(vWorldPos.x*0.30 + uTime*2.2) * sin(vWorldPos.z*0.30 + uTime*1.8);
-        float s2 = sin(vWorldPos.x*0.18 + uTime*1.5 + 0.9) * sin(vWorldPos.z*0.22 + uTime*2.0);
-        col += vec3(0.3, 0.55, 0.85) * clamp(s1*0.5 + s2*0.3 + 0.5, 0.0, 1.0) * 0.06;
-        // Opacidad Fresnel
-        float alpha = mix(0.68, 0.92, fresnel);
-        // Niebla exponencial
-        float fogF = 1.0 - exp(-uFogDensity * length(vWorldPos - cameraPosition));
+        float spec = pow(max(dot(N, halfV), 0.0), 110.0);
+        col += vec3(1.0, 0.97, 0.88) * spec * 1.1;
+
+        // Segundo lóbulo specular más suave (brillo difuso del sol)
+        float spec2 = pow(max(dot(N, halfV), 0.0), 18.0);
+        col += vec3(0.4, 0.65, 0.9) * spec2 * 0.12;
+
+        // Cáusticas animadas
+        float s1 = sin(vWorldPos.x*0.28+uTime*2.1) * sin(vWorldPos.z*0.28+uTime*1.7);
+        float s2 = sin(vWorldPos.x*0.17+uTime*1.4+1.0) * sin(vWorldPos.z*0.21+uTime*1.9);
+        col += vec3(0.35, 0.6, 0.9) * clamp(s1*0.5+s2*0.35+0.5, 0.0, 1.0) * 0.07;
+
+        float alpha = mix(0.65, 0.94, fresnel);
+        float fogF  = 1.0 - exp(-uFogDensity * dist);
         gl_FragColor = vec4(mix(col, uFogColor, fogF), alpha);
       }`;
     waterMesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(8000, 8000, 80, 80),
+      new THREE.PlaneGeometry(1600, 1600, 130, 130),
       new THREE.ShaderMaterial({
         uniforms: {
           uTime:       { value: 0 },
