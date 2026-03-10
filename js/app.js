@@ -1279,15 +1279,25 @@ function worldVertexH(gx, gz) {
   }
   return cnt ? sumH / cnt : 0;
 }
-// Bilinear interpolation of vertex heights — matches visible terrain surface
+// Interpolación de altura que reproduce EXACTAMENTE la misma triangulación
+// que usa buildChunkMesh (tl,bl,tr / tr,bl,br) — evita que árboles/objetos
+// se hundan en terreno empinado
 function groundAt(wx, wz) {
   const gtx = Math.floor(wx / TILE), gtz = Math.floor(wz / TILE);
-  const fx  = (wx - gtx * TILE) / TILE;
-  const fz  = (wz - gtz * TILE) / TILE;
-  return worldVertexH(gtx,   gtz  ) * (1-fx) * (1-fz)
-       + worldVertexH(gtx+1, gtz  ) *    fx  * (1-fz)
-       + worldVertexH(gtx,   gtz+1) * (1-fx) *    fz
-       + worldVertexH(gtx+1, gtz+1) *    fx  *    fz;
+  const fx  = (wx - gtx * TILE) / TILE;   // 0-1 dentro del tile
+  const fz  = (wz - gtz * TILE) / TILE;   // 0-1 dentro del tile
+  const TL = worldVertexH(gtx,   gtz);
+  const TR = worldVertexH(gtx+1, gtz);
+  const BL = worldVertexH(gtx,   gtz+1);
+  const BR = worldVertexH(gtx+1, gtz+1);
+  // El mesh divide cada tile con la diagonal TL→BR:
+  //   Triángulo 1 (TL,BL,TR): fx+fz <= 1
+  //   Triángulo 2 (TR,BL,BR): fx+fz >  1
+  if (fx + fz <= 1) {
+    return TL + (TR - TL) * fx + (BL - TL) * fz;
+  } else {
+    return TR + (1 - fx) * (BL - TR) + (fx + fz - 1) * (BR - TR);
+  }
 }
 
 
@@ -4221,17 +4231,104 @@ function spawnCastleTowers() {
 // ─────────────────────────────────────────────────────────────
 // SISTEMA DE CHUNKS — MUNDO INFINITO PROCEDURAL
 // ─────────────────────────────────────────────────────────────
-const _BIOMES = ['plains','forest','desert','mountains','swamp','jungle'];
 
+// ── Altura global continua (coordenadas de tile globales) ─────────────────
+// Usa SOLO coordenadas globales → idéntica en todo chunk → sin costuras
+function _globalH(gx, gz) {
+  // Escala grande: define zonas de montaña / llanura / desierto
+  const nC = fbm(gx / 55, gz / 55, 4, worldSeed + 111); // 0-1 formas continentales
+  // Escala media: colinas y valles
+  const nM = fbm(gx / 18, gz / 18, 4, worldSeed + 222); // 0-1
+  // Escala fina: detalle local
+  const nF = fbm(gx / 7,  gz / 7,  3, worldSeed + 333); // 0-1
+
+  // Máscara de montañas — transición suave
+  const mW = Math.max(0, Math.min(1, (nC - 0.50) / 0.22));
+  // Máscara de desierto (excluye zonas de montaña)
+  const dN = fbm(gx / 70, gz / 70, 2, worldSeed + 444);
+  const dW = Math.max(0, Math.min(1, (dN - 0.62) / 0.20)) * (1 - mW);
+
+  const hFlat = nM * 13 + nF * 5;          // llanura ondulada  0–18 m
+  const hDune = 1  + nM * 11 + nF * 6;     // dunas              1–18 m
+  const hMtn  = 12 + nC * 72 + nM * 30;    // montañas          12–114 m
+
+  return hFlat * (1 - mW - dW) + hDune * dW + hMtn * mW;
+}
+
+// ── Tipo de tile a partir de coordenadas globales y altura ────────────────
+function _globalTile(gx, gz, h) {
+  const nF    = fbm(gx / 7,  gz / 7,  3, worldSeed + 333);
+  const dN    = fbm(gx / 70, gz / 70, 2, worldSeed + 444);
+  const dW    = Math.max(0, Math.min(1, (dN - 0.62) / 0.20));
+  const swN   = fbm(gx / 45, gz / 45, 2, worldSeed + 555);
+  const swW   = Math.max(0, Math.min(1, (swN - 0.66) / 0.16));
+  const frstN = fbm(gx / 22, gz / 22, 2, worldSeed + 666);
+
+  if (h < 0.4 || nF < 0.055) return T.WATER;
+  if (h > 30)  return T.MOUND;
+  if (dW > 0.35)              return T.SAND;
+  if (swW > 0.4 && h < 9)    return T.FOREST; // ciénaga
+  if (frstN > 0.52)           return T.FOREST;
+  return T.GRASS;
+}
+
+// ── Etiqueta de bioma por chunk (solo para densidad de árboles) ───────────
 function _chunkBiome(cx, cz) {
   if (cx === 0 && cz === 0) return 'home';
-  const n = fbm(cx * 0.65, cz * 0.65, 3, 54321);
-  if (n < 0.18) return 'desert';
-  if (n < 0.40) return 'plains';
-  if (n < 0.60) return 'forest';
-  if (n < 0.78) return 'mountains';
-  if (n < 0.90) return 'swamp';
-  return 'jungle';
+  const gx = cx * WORLD + WORLD / 2, gz = cz * WORLD + WORLD / 2;
+  const nC = fbm(gx / 55, gz / 55, 4, worldSeed + 111);
+  const mW = Math.max(0, Math.min(1, (nC - 0.50) / 0.22));
+  if (mW > 0.4) return 'mountains';
+  const dN = fbm(gx / 70, gz / 70, 2, worldSeed + 444);
+  if (dN > 0.62) return 'desert';
+  const swN = fbm(gx / 45, gz / 45, 2, worldSeed + 555);
+  if (swN > 0.66) return 'swamp';
+  const frstN = fbm(gx / 22, gz / 22, 2, worldSeed + 666);
+  if (frstN > 0.58) return 'forest';
+  return 'plains';
+}
+
+// ── Erosión hidráulica — simula gotas de lluvia sobre el heightmap ────────
+function _hydraulicErosion(hmap, map, W) {
+  const DROPS = 280, STEPS = 80;
+  const INERTIA = 0.08, DEPOSIT = 0.32, ERODE = 0.26, EVAP = 0.018;
+  for (let d = 0; d < DROPS; d++) {
+    let px = 1 + Math.random() * (W - 3);
+    let pz = 1 + Math.random() * (W - 3);
+    let vx = 0, vz = 0, water = 1, sed = 0;
+    for (let s = 0; s < STEPS; s++) {
+      const ix = Math.floor(px), iz = Math.floor(pz);
+      if (ix < 1 || ix >= W - 1 || iz < 1 || iz >= W - 1) break;
+      if (map[iz][ix] === T.WATER) break;
+      // Gradiente por diferencias centradas
+      const gxg = (hmap[iz][ix + 1] - hmap[iz][ix - 1]) * 0.5;
+      const gzg = (hmap[iz + 1][ix] - hmap[iz - 1][ix]) * 0.5;
+      vx = vx * INERTIA - gxg * (1 - INERTIA);
+      vz = vz * INERTIA - gzg * (1 - INERTIA);
+      const len = Math.sqrt(vx * vx + vz * vz) || 1;
+      vx /= len; vz /= len;
+      const nx = px + vx, nz = pz + vz;
+      const nix = Math.floor(nx), niz = Math.floor(nz);
+      if (nix < 1 || nix >= W - 1 || niz < 1 || niz >= W - 1) break;
+      const dh = hmap[niz][nix] - hmap[iz][ix];
+      const speed = Math.sqrt(vx * vx + vz * vz);
+      const cap = Math.max(0.01, -dh) * speed * water;
+      if (dh > 0) {
+        // subiendo: depositar sedimento
+        const dep = Math.min(sed, dh * 0.5);
+        hmap[iz][ix] += dep; sed -= dep;
+      } else if (sed > cap) {
+        const dep = (sed - cap) * DEPOSIT;
+        hmap[iz][ix] += dep; sed -= dep;
+      } else {
+        const ero = Math.min((cap - sed) * ERODE, -dh * 0.45);
+        hmap[iz][ix] = Math.max(0, hmap[iz][ix] - ero); sed += ero;
+      }
+      water *= (1 - EVAP);
+      if (water < 0.02) break;
+      px = nx; pz = nz;
+    }
+  }
 }
 
 function generateChunkData(cx, cz) {
@@ -4242,57 +4339,46 @@ function generateChunkData(cx, cz) {
   for (let z = 0; z < WORLD; z++) {
     for (let x = 0; x < WORLD; x++) {
       const gx = cx * WORLD + x, gz = cz * WORLD + z;
-      const n  = fbm(gx / 15, gz / 15, 4, worldSeed + 200);
-      const n2 = fbm(gx / 6,  gz / 6,  3, worldSeed + 300);
-      switch (biome) {
-        case 'plains':
-          map[z][x]  = n2 < 0.16 ? T.WATER : T.GRASS;
-          hmap[z][x] = n2 < 0.16 ? 0 : n * 9;
-          break;
-        case 'forest':
-          map[z][x]  = n2 < 0.07 ? T.WATER : T.FOREST;
-          hmap[z][x] = n2 < 0.07 ? 0 : 0.5 + n * 13;
-          break;
-        case 'desert':
-          map[z][x]  = n2 < 0.05 ? T.WATER : T.SAND;
-          hmap[z][x] = n2 < 0.05 ? 0 : 0.4 + n * 9;
-          break;
-        case 'mountains':
-          map[z][x]  = n < 0.14 ? T.GRASS : T.MOUND;
-          hmap[z][x] = n < 0.14 ? n * 5   : 3 + n * 34;
-          break;
-        case 'swamp':
-          map[z][x]  = n2 < 0.42 ? T.WATER : T.FOREST;
-          hmap[z][x] = n2 < 0.42 ? 0       : n * 5;
-          break;
-        case 'jungle':
-          map[z][x]  = n2 < 0.12 ? T.WATER : T.FOREST;
-          hmap[z][x] = n2 < 0.12 ? 0       : 0.5 + n * 17;
-          break;
-      }
+      const h  = _globalH(gx, gz);
+      const t  = _globalTile(gx, gz, h);
+      map[z][x]  = t;
+      hmap[z][x] = (t === T.WATER) ? 0 : Math.max(0, h);
     }
   }
-  // Gaussian blur — 2 passes
-  for (let pass = 0; pass < 2; pass++) {
-    const bl = hmap.map(r => [...r]);
-    for (let z = 1; z < WORLD-1; z++) for (let x = 1; x < WORLD-1; x++) {
-      if (map[z][x] === T.WATER) continue;
-      let sum = 0, w = 0;
-      for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
-        if (map[z+dz][x+dx] === T.WATER) continue;
-        const wt = (dz===0&&dx===0)?4:(dz===0||dx===0)?2:1;
-        sum += hmap[z+dz][x+dx]*wt; w += wt;
-      }
-      bl[z][x] = sum/w;
+  // Gaussian blur — 1 paso (preserva picos de montaña)
+  const bl = hmap.map(r => [...r]);
+  for (let z = 1; z < WORLD - 1; z++) for (let x = 1; x < WORLD - 1; x++) {
+    if (map[z][x] === T.WATER) continue;
+    let sum = 0, w = 0;
+    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+      if (map[z+dz][x+dx] === T.WATER) continue;
+      const wt = (dz===0&&dx===0)?4:(dz===0||dx===0)?2:1;
+      sum += hmap[z+dz][x+dx]*wt; w += wt;
     }
-    for (let z = 0; z < WORLD; z++) for (let x = 0; x < WORLD; x++) hmap[z][x] = bl[z][x];
+    bl[z][x] = sum / w;
   }
+  for (let z = 0; z < WORLD; z++) for (let x = 0; x < WORLD; x++) hmap[z][x] = bl[z][x];
+  // Erosión hidráulica
+  _hydraulicErosion(hmap, map, WORLD);
   return { map, hmap, biome, mesh: null, collider: null, trees: [] };
 }
 
 function buildChunkMesh(cx, cz) {
   const chunk = chunkMap.get(`${cx},${cz}`);
   if (!chunk || chunk.mesh) return;
+
+  // Pre-generar datos de los 8 vecinos para que las costuras del borde queden a la misma altura
+  for (let dcz=-1;dcz<=1;dcz++) for (let dcx=-1;dcx<=1;dcx++) {
+    if (!dcx&&!dcz) continue;
+    const nk=`${cx+dcx},${cz+dcz}`;
+    if (!chunkMap.has(nk)) {
+      const ncx=cx+dcx, ncz=cz+dcz;
+      chunkMap.set(nk, (ncx===0&&ncz===0)
+        ? {map:worldMap,hmap:heightMap,mesh:null,collider:null,trees:[],biome:'home'}
+        : generateChunkData(ncx,ncz));
+    }
+  }
+
   const offsetX = cx * WORLD * TILE, offsetZ = cz * WORLD * TILE;
   const V = WORLD + 1;
   const positions = new Float32Array(V * V * 3);
