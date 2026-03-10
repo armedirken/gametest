@@ -3583,9 +3583,9 @@ function spawnBossSlime() {
     phase: 0,
     fixedY: bossFloorY,   // no usar groundAt — siempre sobre el techo
     aggroRange: 55,        // ve al jugador desde lejos
-    lungeRange: 9.5,       // inicia ataque antes de que el colisionador lo bloquee
-    hitRange:   7.5,       // impacto al tocar el cuerpo del boss
-    swordHitRange: 8.5,   // rango para que espada del jugador golpee al boss
+    lungeRange: 11.0,      // inicia ciclo de ataque (> radio colisionador 8.82m)
+    hitRange:   10.5,      // boss golpea jugador al contacto con su cuerpo
+    swordHitRange: 10.0,  // espada alcanza la superficie del boss desde el borde
     chaseSpeed: 4.5,       // m/s persecución
     lungeSpeed: 16.0,      // m/s durante el lunge
     _bossMat: bossMat, _bossBody: body, _bossScale: SC,
