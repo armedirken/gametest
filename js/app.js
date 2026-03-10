@@ -171,6 +171,8 @@ let mazeObstacles  = [];   // obstáculos móviles del laberinto
 let mazeKey        = null; // llave del laberinto { mesh, wx, wz, collected }
 let hasKey         = false;
 let mazeDmgCooldown = 0;   // cooldown para daño de obstáculos del laberinto
+let towerDoor      = null; // puerta de la torre { mesh, rb, opened, opening, openT, ... }
+let doorMsgCooldown = 0;  // evita spam del mensaje "necesitas la llave"
 
 // Vectores temporales reutilizables — elimina allocations por frame en move()
 const _tmpQ  = new THREE.Quaternion();
@@ -3081,6 +3083,44 @@ renderer.setAnimationLoop(() => {
     }
   }
 
+  // ── Puerta de la torre (requiere llave) ──────────────────────
+  if (towerDoor && !towerDoor.opened) {
+    doorMsgCooldown = Math.max(0, doorMsgCooldown - dt);
+    const tdx = towerDoor.doorX - rig.position.x;
+    const tdz = towerDoor.doorZ - rig.position.z;
+    const tdy = towerDoor.doorBaseY - rig.position.y;
+    const tdist2 = tdx * tdx + tdz * tdz + tdy * tdy;
+
+    if (towerDoor.opening) {
+      // Portcullis sube hasta desaparecer
+      towerDoor.openT += dt;
+      const prog = Math.min(towerDoor.openT / 1.0, 1);
+      towerDoor.mesh.position.y = towerDoor.doorBaseY + towerDoor.DOOR_H / 2
+                                 + prog * (towerDoor.DOOR_H + 2);
+      if (prog >= 1) {
+        towerDoor.opened = true;
+        scene.remove(towerDoor.mesh);
+        if (towerDoor.rb && rapierWorld) {
+          rapierWorld.removeRigidBody(towerDoor.rb);
+          towerDoor.rb = null;
+        }
+      }
+    } else if (tdist2 < 7 * 7) {
+      if (hasKey) {
+        towerDoor.opening = true;
+        sfx.starCollect();
+      } else if (doorMsgCooldown === 0) {
+        doorMsgCooldown = 3.0;
+        const el = document.getElementById('biome-indicator');
+        if (el) {
+          el.textContent = '🔒 Necesitas la llave del castillo';
+          el.style.opacity = '1';
+          setTimeout(() => { el.style.opacity = '0'; }, 2500);
+        }
+      }
+    }
+  }
+
   // Animate hearts + pickup
   for (let i = hearts.length - 1; i >= 0; i--) {
     const h = hearts[i];
@@ -3873,6 +3913,63 @@ function spawnSpiralStairs() {
 // ─────────────────────────────────────────────────────────────
 // PUENTE — Torre SW → cima muro castillo
 // ─────────────────────────────────────────────────────────────
+function spawnTowerDoor() {
+  // Mismas constantes que spawnBridge() para coincidir con el inicio del puente
+  const towerR = TILE * 1.3, WALL_D = TILE * 0.55, BLOCK_H = TILE * 0.52;
+  const innerR  = towerR - WALL_D / 2;
+  const CASTLE_CX = 31 * TILE + TILE * 0.5, CASTLE_CZ = 17 * TILE + TILE * 0.5;
+  const wx = 17 * TILE + TILE * 0.5, wz = 24 * TILE + TILE * 0.5;
+  const bh = groundAt(wx, wz);
+  const doorAngle = Math.atan2(CASTLE_CZ - wz, CASTLE_CX - wx);
+  const cdx = Math.cos(doorAngle), cdz = Math.sin(doorAngle);
+
+  // Posición: justo en la apertura interior de la torre (inicio del puente)
+  const doorX = wx + cdx * (innerR - 0.4);
+  const doorZ = wz + cdz * (innerR - 0.4);
+  const doorBaseY = bh + BLOCK_H * 10;  // misma altura que el suelo del puente
+  const DOOR_W = 6.0, DOOR_H = 7.5, DOOR_T = 1.2;
+
+  // Rotación: cara de la puerta perpendicular al puente (bloquea el paso)
+  const faceQ = new THREE.Quaternion().setFromUnitVectors(
+    new THREE.Vector3(0, 0, 1),
+    new THREE.Vector3(cdx, 0, cdz)
+  );
+
+  const doorMat = new THREE.MeshLambertMaterial({ color: 0x1a0f00, flatShading: true });
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(DOOR_W, DOOR_H, DOOR_T), doorMat);
+  mesh.position.set(doorX, doorBaseY + DOOR_H / 2, doorZ);
+  mesh.quaternion.copy(faceQ);
+  mesh.castShadow = mesh.receiveShadow = true;
+  scene.add(mesh);
+
+  // Barrotes de madera para que parezca una reja/portcullis
+  const barMat = new THREE.MeshLambertMaterial({ color: 0x3a1f00 });
+  for (let i = -1; i <= 1; i++) {
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(0.22, DOOR_H * 0.9, DOOR_T * 1.1), barMat);
+    bar.position.set(i * DOOR_W * 0.28, 0, 0);
+    mesh.add(bar);
+  }
+  for (let j = -1; j <= 1; j++) {
+    const rail = new THREE.Mesh(new THREE.BoxGeometry(DOOR_W * 0.9, 0.22, DOOR_T * 1.1), barMat);
+    rail.position.set(0, j * DOOR_H * 0.28, 0);
+    mesh.add(rail);
+  }
+
+  // Rapier: kinematic body → se puede eliminar al abrir
+  let rb = null;
+  if (rapierWorld) {
+    const rbd = RAPIER.RigidBodyDesc.kinematicPositionBased()
+      .setTranslation(doorX, doorBaseY + DOOR_H / 2, doorZ)
+      .setRotation({ x: faceQ.x, y: faceQ.y, z: faceQ.z, w: faceQ.w });
+    rb = rapierWorld.createRigidBody(rbd);
+    rapierWorld.createCollider(
+      RAPIER.ColliderDesc.cuboid(DOOR_W / 2, DOOR_H / 2, DOOR_T / 2), rb
+    );
+  }
+
+  towerDoor = { mesh, rb, doorX, doorZ, doorBaseY, DOOR_H, opened: false, opening: false, openT: 0 };
+}
+
 function spawnBridge() {
   const WLAYERS = 7, WSCALE = TILE / (3 * 0.68), LAYER_H = 1.02 * WSCALE;
   const towerR = TILE * 1.3, WALL_D = TILE * 0.55, BLOCK_H = TILE * 0.52;
@@ -4380,6 +4477,7 @@ async function initGame() {
   spawnCastleRoof();
   spawnCastleMaze();
   spawnBossSlime();
+  spawnTowerDoor();
   spawnSpiralStairs();
   spawnBridge();
   buildMinimap();
