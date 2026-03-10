@@ -4486,8 +4486,9 @@ function updateChunks() {
       chunkMap.set(key, cx===0&&cz===0
         ? {map:worldMap,hmap:heightMap,mesh:null,collider:null,trees:[],biome:'home'}
         : generateChunkData(cx,cz));
-      buildChunkMesh(cx,cz);
     }
+    // Construir mesh si aún no existe (puede estar pre-generado sin mesh)
+    if (!chunkMap.get(key).mesh) buildChunkMesh(cx,cz);
   }
   // Unload far chunks
   for (const key of [...chunkMap.keys()]) {
