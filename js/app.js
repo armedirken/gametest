@@ -177,7 +177,8 @@ let doorMsgCooldown = 0;  // evita spam del mensaje "necesitas la llave"
 // ── Sistema de chunks — mundo infinito ──────────────────────
 const chunkMap = new Map(); // "cx,cz" → {map, hmap, mesh, collider, trees, biome}
 const CHUNK_R  = 1;         // radio de carga (chunks) — 3×3=9; fog limita visión a ~200m
-let  _chunkTick = 0;        // throttle
+let  _chunkTick = 0;        // throttle updateChunks (cada 45 frames)
+let  _slowTick  = 0;        // throttle NPCs y efectos lentos (cada 3 frames)
 const _chunkBuildQ = [];    // cola asíncrona: construir 1 chunk por frame
 
 // Vectores temporales reutilizables — elimina allocations por frame en move()
@@ -2288,9 +2289,20 @@ function updateEnemies(dt) {
       if (e.hitFlashT <= 0) e.mesh.children[0].material = e._bossMat || e._dmgMat || ENEMY_MAT_BODY;
     }
 
+    // ── groundAt con caché por enemigo — solo recalcular si se movió >2m ─────
+    if (e._groundCacheX === undefined) { e._groundCacheX = e.mesh.position.x; e._groundCacheZ = e.mesh.position.z; e._groundCacheY = groundAt(e.mesh.position.x, e.mesh.position.z); }
+    else {
+      const _gcDx = e.mesh.position.x - e._groundCacheX, _gcDz = e.mesh.position.z - e._groundCacheZ;
+      if (_gcDx*_gcDx + _gcDz*_gcDz > 4) { // >2m
+        e._groundCacheX = e.mesh.position.x; e._groundCacheZ = e.mesh.position.z;
+        e._groundCacheY = groundAt(e.mesh.position.x, e.mesh.position.z);
+      }
+    }
+    const _cachedGroundY = e._groundCacheY;
+
     // ── Gusano de arena: lógica emerge/submerge ───────────────────────────────
     if (e._worm) {
-      e._wormGroundY = groundAt(e.mesh.position.x, e.mesh.position.z);
+      e._wormGroundY = _cachedGroundY;
       e._wormT -= dt;
       if (e._wormState === 'hidden') {
         // Bajo tierra — invisible hasta que el jugador se acerque
@@ -2312,10 +2324,10 @@ function updateEnemies(dt) {
       }
     }
 
-    // Ground snap — usa fixedY para el boss (sobre el techo), groundAt para el resto
+    // Ground snap — usa fixedY para el boss, caché para el resto
     const gY = e._worm
       ? e.mesh.position.y  // el gusano controla su propio Y
-      : (e.fixedY !== undefined) ? e.fixedY : groundAt(e.mesh.position.x, e.mesh.position.z);
+      : (e.fixedY !== undefined) ? e.fixedY : _cachedGroundY;
     if (!e._worm) e.mesh.position.y += (gY - e.mesh.position.y) * Math.min(1, dt * 12);
     const body = e.mesh.children[0]; // body sphere
 
@@ -2412,8 +2424,8 @@ function updateEnemies(dt) {
           }
 
         } else if (e.lungePhase === 'retreat') {
-          // Vuelve al suelo y retrocede (usa fixedY para el boss)
-          const groundY = (e.fixedY !== undefined) ? e.fixedY : groundAt(e.mesh.position.x, e.mesh.position.z);
+          // Vuelve al suelo y retrocede (usa fixedY para el boss, caché para el resto)
+          const groundY = (e.fixedY !== undefined) ? e.fixedY : _cachedGroundY;
           e.mesh.position.y += (groundY - e.mesh.position.y) * Math.min(1, 10 * dt);
           const newX = e.mesh.position.x + e.lungeDir.x * 4.5 * dt;
           const newZ = e.mesh.position.z + e.lungeDir.z * 4.5 * dt;
@@ -2813,7 +2825,7 @@ function showVictory() {
 let starEl;
 function updateStarCounter() {
   if (starEl) starEl.textContent = '\u2605 ' + coinsCollected + ' / ' + stars.length;
-  drawHUD3d();
+  _hudDirty = true;
 }
 
 function checkStarCollection() {
@@ -3045,7 +3057,15 @@ const MM_PALETTE = {
 
 function buildMinimap() { /* no-op — ahora drawMinimap lee chunkMap en tiempo real */ }
 
+// Pre-alloc para evitar createImageData() cada frame
+let _mmImageData = null;
+let _mmFrame = 0;
+
 function drawMinimap() {
+  // Throttle: desktop cada 3 frames, VR cada 6
+  const step = renderer.xr.isPresenting ? 6 : 3;
+  if (++_mmFrame % step !== 0) return;
+
   const MM   = WORLD;       // 64px
   const HALF = MM >> 1;     // 32 — jugador siempre en el centro
 
@@ -3055,7 +3075,8 @@ function drawMinimap() {
 
   // Reconstruir imagen desde chunkMap centrada en el jugador
   const ctx = mmDisp.getContext('2d');
-  const id  = ctx.createImageData(MM, MM);
+  if (!_mmImageData) _mmImageData = ctx.createImageData(MM, MM); // crea una sola vez
+  const id  = _mmImageData;
   for (let dz = 0; dz < MM; dz++) {
     for (let dx = 0; dx < MM; dx++) {
       const gtx = ptx - HALF + dx;
@@ -3101,9 +3122,11 @@ function drawMinimap() {
 let hpBarEl;
 // 3D HUD canvas — works in desktop and VR
 let hudCtx3d = null, hudTex3d = null, mmTex3d = null, hudMesh3d = null, mmMesh3d = null;
+let _hudDirty = true; // redibuja HUD3D solo cuando cambia HP / monedas / misión
 
 function drawHUD3d() {
-  if (!hudCtx3d) return;
+  if (!hudCtx3d || !_hudDirty) return;
+  _hudDirty = false;
   const ctx = hudCtx3d;
   ctx.clearRect(0, 0, 512, 128);
   ctx.fillStyle = 'rgba(0,0,0,0.65)';
@@ -3191,7 +3214,7 @@ function updateHPBar() {
     hpBarEl.textContent = '♥'.repeat(playerHP) + '♡'.repeat(Math.max(0, 5 - playerHP));
     hpBarEl.style.color = playerHP <= 1 ? '#ff4444' : '#ff8888';
   }
-  drawHUD3d();
+  _hudDirty = true;
   if (playerHP === 0) showGameOver();
 }
 
@@ -3235,7 +3258,7 @@ function updateQuestHUD() {
       questHudEl.textContent = q.title + '  [' + bar + ']  ' + questProgress + '/' + q.goal;
     }
   }
-  drawHUD3d(); // actualiza barra de misión en HUD 3D (visible en VR)
+  _hudDirty = true; // actualiza barra de misión en HUD 3D (visible en VR)
 }
 
 function openDialog(npc) {
@@ -3391,7 +3414,7 @@ function buildHUD() {
   npcDlgMesh.visible = false;
   camera.add(npcDlgMesh);
 
-  drawHUD3d();
+  _hudDirty = true; // dibujar HUD en el primer frame
 
   // ── Armas de PC (solo visibles en desktop, ocultas en VR) ────
   pcSword = createSword();
@@ -3451,22 +3474,30 @@ renderer.setAnimationLoop(() => {
     move(dt);
     if (++_chunkTick % 45 === 0) updateChunks(); // verificar chunks cada 45 frames
     updateEnemies(dt);
+    // Limpiar enemigos muertos del array tras su animación de muerte
+    for (let _i = enemies.length - 1; _i >= 0; _i--) {
+      if (enemies[_i].dead && enemies[_i].deathT > 0.45) enemies.splice(_i, 1);
+    }
     updatePushRocks(dt);
     updateDragons(dt);
-    updateNPCs(dt);
+    const _slow = (++_slowTick % 3 === 0); // true cada 3 frames (~20fps)
+    if (_slow) updateNPCs(dt);
     checkStarCollection();
     updateDayNight(dt);
     updateRain(dt);
     updateCameraShake(dt);
   }
-  // Agua: cada 3 frames en desktop, omitir en VR
-  updateWater(elapsed); // solo actualiza uniforms — sin coste CPU
-  // Minimapa: en VR actualizar cada 6 frames, en desktop cada frame
-  if (!renderer.xr.isPresenting || Math.round(elapsed * 10) % 6 === 0) drawMinimap();
+  // Agua: solo uniforms (sin coste CPU)
+  updateWater(elapsed);
+  // HUD 3D: solo si cambió HP / monedas / misión
+  drawHUD3d();
+  // Minimapa: throttle interno (3 frames desktop, 6 VR)
+  drawMinimap();
 
-  // Animate coins — InstancedMesh (coin magnet + rise animation)
+  // Animate coins — InstancedMesh (bobbing cada 2 frames, rising/collected siempre)
   if (coinIM) {
     let coinChanged = false;
+    const _doCoinBob = (_slowTick % 2 === 0); // bobbing a ~30fps
     for (const s of stars) {
       if (s.rising) {
         s.riseT += dt;
@@ -3475,22 +3506,29 @@ renderer.setAnimationLoop(() => {
         coinDummy.scale.setScalar(1 - prog);
         coinDummy.rotation.set(0, 0, 0);
         if (prog >= 1) s.rising = false;
+        coinDummy.updateMatrix();
+        coinIM.setMatrixAt(s.instIdx, coinDummy.matrix);
         coinChanged = true;
       } else if (s.collected) {
-        coinDummy.scale.setScalar(0);
-        coinDummy.position.set(s.wx, s.baseY, s.wz);
-        coinDummy.rotation.set(0, 0, 0);
-        coinChanged = true;
-      } else {
+        // Solo escribir una vez (cuando recién se marca collected)
+        if (!s._hiddenInIM) {
+          coinDummy.scale.setScalar(0);
+          coinDummy.position.set(s.wx, s.baseY, s.wz);
+          coinDummy.rotation.set(0, 0, 0);
+          coinDummy.updateMatrix();
+          coinIM.setMatrixAt(s.instIdx, coinDummy.matrix);
+          s._hiddenInIM = true;
+          coinChanged = true;
+        }
+      } else if (_doCoinBob) {
         coinDummy.position.set(s.wx, s.baseY + Math.sin(elapsed * 2.5 + s.phase) * 0.18, s.wz);
         coinDummy.rotation.set(elapsed * 1.8 + s.phase, 0, 0);
         coinDummy.scale.setScalar(1);
+        coinDummy.updateMatrix();
+        coinIM.setMatrixAt(s.instIdx, coinDummy.matrix);
         coinChanged = true;
       }
-      coinDummy.updateMatrix();
-      coinIM.setMatrixAt(s.instIdx, coinDummy.matrix);
     }
-    // Only flag needsUpdate when coins actually changed (optimización Part 3)
     if (coinChanged) coinIM.instanceMatrix.needsUpdate = true;
   }
 
@@ -5348,14 +5386,15 @@ function updateNPCs(dt) {
     p.mesh.material.opacity = p.life / 0.6;
   }
 
-  // Fireflies (mejora #12)
-  for (const ff of fireflyList) {
-    ff.mesh.position.y = ff.baseY + Math.sin(elapsed * 1.8 + ff.phase) * 0.4;
-    ff.mesh.position.x = ff.wx   + Math.sin(elapsed * 1.2 + ff.phase + 1) * 0.5;
-    ff.mesh.position.z = ff.wz   + Math.cos(elapsed * 1.0 + ff.phase) * 0.5;
-    // Solo visible de noche
+  // Fireflies (mejora #12) — solo cada 4 frames, se mueven lento
+  if (_slowTick % 4 === 0) {
     const isNight = dayTime < 0.25 || dayTime > 0.75;
-    ff.mesh.visible = isNight;
+    for (const ff of fireflyList) {
+      ff.mesh.position.y = ff.baseY + Math.sin(elapsed * 1.8 + ff.phase) * 0.4;
+      ff.mesh.position.x = ff.wx   + Math.sin(elapsed * 1.2 + ff.phase + 1) * 0.5;
+      ff.mesh.position.z = ff.wz   + Math.cos(elapsed * 1.0 + ff.phase) * 0.5;
+      ff.mesh.visible = isNight;
+    }
   }
 
   // Player shadow update — se achica al saltar, siempre en el suelo
