@@ -108,7 +108,34 @@ const QUEST_DEFS = [
   { id:3, title:'El Gran Explorador',      desc:'Llega al interior\nde la Ciudadela Eryndell.',          goal:1,  type:'castle',  reward:'una bolsa de monedas' },
   { id:4, title:'El Último Superviviente', desc:'Sobrevive 60 segundos\ncon enemigos cerca.',            goal:60, type:'survive', reward:'el escudo legendario' },
   { id:5, title:'El Señor del Castillo',   desc:'Sube al techo del castillo\ny derrota al Slime Gigante.', goal:1, type:'boss', reward:'la Gran Moneda del Boss' },
+  { id:6, title:'Tesoros del Desierto',   desc:'Recoge 10 cristales\ndel desierto.',                      goal:10, type:'crystals', reward:'armadura de arena' },
+  { id:7, title:'Caravana Perdida',       desc:'Encuentra 5 cofres\nen la arena.',                         goal:5,  type:'chests',  reward:'monedas de oro' },
+  { id:8, title:'El Herborista',          desc:'Derrota 8 arañas\nde la jungla.',                          goal:8,  type:'spiders', reward:'poción de vida' },
+  { id:9, title:'El Gran Cazador',        desc:'Elimina 5 lobos\ndel bosque.',                             goal:5,  type:'wolves',  reward:'capa del bosque' },
 ];
+
+// ── Castillos en el mundo infinito ──────────────────────────────────────────
+const WORLD_CASTLES = [
+  { cx: 4,  cz: 4,  tileCX: 32, tileCZ: 32, name: 'Palacio del Desierto', style: 'desert', bossColor: 0xc8961e },
+  { cx: -3, cz: -3, tileCX: 32, tileCZ: 32, name: 'Fortaleza Helada',     style: 'ice',    bossColor: 0x8ab4c8 },
+];
+
+// ── Aldeas en el mundo infinito ─────────────────────────────────────────────
+const WORLD_VILLAGES = [
+  { cx: 3, cz: 5, tileCX: 28, tileCZ: 28, name: 'Pueblo del Sol',
+    npcs: [
+      { name: 'Sheik',    color: 0xf5c842, tx: 29, tz: 28, questId: 6 },
+      { name: 'Mercader', color: 0xd4884a, tx: 28, tz: 29, questId: 7 },
+    ]
+  },
+  { cx: -2, cz: 3, tileCX: 36, tileCZ: 28, name: 'Aldea del Bosque',
+    npcs: [
+      { name: 'Druida',   color: 0x2a7a2a, tx: 37, tz: 28, questId: 8 },
+      { name: 'Cazadora', color: 0x8a5a2a, tx: 36, tz: 29, questId: 9 },
+    ]
+  },
+];
+
 let activeQuestId   = -1;
 let questProgress   = 0;
 let questComplete   = false;
@@ -192,6 +219,7 @@ const treePartsList = [
   [_buildTreeParts(97,0), _buildTreeParts(97,1), _buildTreeParts(97,2)],      // pradera
   [_buildSnowTreeParts(13,0), _buildSnowTreeParts(13,1), _buildSnowTreeParts(13,2)], // montaña nevada
   [_buildCactusParts(7), _buildCactusParts(23), _buildCactusParts(41)],       // desierto
+  [_buildPalmParts(1), _buildPalmParts(2), _buildPalmParts(3)],               // palmeras (playa)
 ];
 
 // Fill a rectangular region with tile type t
@@ -2528,9 +2556,27 @@ function onEnemyKilled(e) {
     updateQuestHUD();
     if (enemiesKilled >= 5) { questComplete = true; updateQuestHUD(); }
   }
-  // Quest boss
+  // Quest boss principal
   if (activeQuestId === 5 && e._bossScale) {
     questProgress = 1; questComplete = true; updateQuestHUD();
+  }
+  // Quest boss de castillos del mundo
+  if (e._bossScale && (activeQuestId === 6 || activeQuestId === 7)) {
+    questProgress = Math.min(QUEST_DEFS[activeQuestId].goal, questProgress + 3);
+    if (questProgress >= QUEST_DEFS[activeQuestId].goal) questComplete = true;
+    updateQuestHUD();
+  }
+  // Quest lobos (id=9)
+  if (activeQuestId === 9 && e._wolfBody) {
+    questProgress++;
+    if (questProgress >= QUEST_DEFS[9].goal) questComplete = true;
+    updateQuestHUD();
+  }
+  // Quest arañas (id=8)
+  if (activeQuestId === 8 && e._spiderBody) {
+    questProgress++;
+    if (questProgress >= QUEST_DEFS[8].goal) questComplete = true;
+    updateQuestHUD();
   }
   // Combo (mejora #15)
   comboTimer = 3.0;
@@ -2898,7 +2944,22 @@ function updateDayNight(dt) {
     skyCol = _skyDawn.clone().lerp(_skyNight, (dayTime - 0.75) / 0.25);
   }
   scene.background = skyCol;
-  scene.fog.color.copy(skyCol);
+
+  // Niebla: densidad varía día/noche + color por bioma del jugador
+  const _pcx = Math.floor(rig.position.x / (WORLD * TILE));
+  const _pcz = Math.floor(rig.position.z / (WORLD * TILE));
+  const _pbiome = _chunkBiome(_pcx, _pcz);
+  const isNightFog = dayTime < 0.25 || dayTime > 0.75;
+  scene.fog.density = isNightFog ? 0.0095 : 0.006;
+  // Tinte de niebla por bioma (se mezcla suavemente con el color del cielo)
+  const _biomeCol = new THREE.Color(
+    _pbiome === 'desert' || _pbiome === 'hotdesert' || _pbiome === 'sahel' ? 0xd4b882 :
+    _pbiome === 'archipelago' || _pbiome === 'mangrove' ? 0x7cc8e8 :
+    _pbiome === 'tundra' || _pbiome === 'alpine' ? 0xd0e8f0 :
+    _pbiome === 'jungle' || _pbiome === 'rainforest' || _pbiome === 'tropicalforest' ? 0x6db86d :
+    skyCol.getHex()
+  );
+  scene.fog.color.copy(skyCol).lerp(_biomeCol, 0.35);
 
   // Sun brightness: bright at noon, dark at night
   const brightness = Math.max(0, sinT); // 0 at night, 1 at noon
@@ -3013,6 +3074,64 @@ function updateRain(dt) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// NIEVE Y ARENA — partículas ambientales por bioma
+// ─────────────────────────────────────────────────────────────
+const FLAKE_COUNT = 300;
+let snowMesh = null, sandMesh = null;
+const snowVels = new Float32Array(FLAKE_COUNT);
+const sandVels = new Float32Array(FLAKE_COUNT);
+
+function _makeFlakeMesh(color, size) {
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(FLAKE_COUNT * 3);
+  for (let i = 0; i < FLAKE_COUNT; i++) {
+    pos[i*3]   = (Math.random()-0.5)*80;
+    pos[i*3+1] = Math.random()*30;
+    pos[i*3+2] = (Math.random()-0.5)*80;
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const mat = new THREE.PointsMaterial({ color, size, transparent: true, opacity: 0.75, depthWrite: false });
+  return new THREE.Points(geo, mat);
+}
+
+function _initWeatherParticles() {
+  snowMesh = _makeFlakeMesh(0xddeeff, 0.25); snowMesh.visible = false; scene.add(snowMesh);
+  sandMesh = _makeFlakeMesh(0xd4a850, 0.18); sandMesh.visible = false; scene.add(sandMesh);
+  for (let i = 0; i < FLAKE_COUNT; i++) { snowVels[i] = 1.5+Math.random()*2; sandVels[i] = 4+Math.random()*5; }
+}
+
+function updateWeatherParticles(dt, biome) {
+  const isSnowBiome = biome==='alpine'||biome==='tundra';
+  const isSandBiome = biome==='hotdesert'||biome==='desert'||biome==='sahel';
+  if (snowMesh) {
+    snowMesh.visible = isSnowBiome;
+    if (isSnowBiome) {
+      snowMesh.position.set(rig.position.x, 0, rig.position.z);
+      const p = snowMesh.geometry.attributes.position;
+      for (let i=0;i<FLAKE_COUNT;i++) {
+        p.array[i*3+1] -= snowVels[i]*dt;
+        p.array[i*3]   += Math.sin(elapsed*0.7+i)*0.02;
+        if (p.array[i*3+1] < -2) p.array[i*3+1] = 28;
+      }
+      p.needsUpdate = true;
+    }
+  }
+  if (sandMesh) {
+    sandMesh.visible = isSandBiome;
+    if (isSandBiome) {
+      sandMesh.position.set(rig.position.x, 0, rig.position.z);
+      const p = sandMesh.geometry.attributes.position;
+      for (let i=0;i<FLAKE_COUNT;i++) {
+        p.array[i*3]   += sandVels[i]*dt*0.9;
+        p.array[i*3+1] += Math.sin(elapsed*1.2+i*0.5)*0.04;
+        if (p.array[i*3] > 40) p.array[i*3] = -40;
+      }
+      p.needsUpdate = true;
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // MINIMAP
 // ─────────────────────────────────────────────────────────────
 const mmBuf = document.createElement('canvas');
@@ -3120,6 +3239,7 @@ function drawMinimap() {
 // HUD
 // ─────────────────────────────────────────────────────────────
 let hpBarEl;
+let _biomeBannerEl = null; // banner de nombre de bioma
 // 3D HUD canvas — works in desktop and VR
 let hudCtx3d = null, hudTex3d = null, mmTex3d = null, hudMesh3d = null, mmMesh3d = null;
 let _hudDirty = true; // redibuja HUD3D solo cuando cambia HP / monedas / misión
@@ -3338,6 +3458,17 @@ function buildHUD() {
     <div id="stars" style="font-size:14px;color:#ffd700;margin-top:3px">&#9733; 0 / 0</div>
   `;
   document.body.appendChild(el);
+
+  // Banner de bioma — aparece centrado arriba al cambiar de bioma
+  _biomeBannerEl = document.createElement('div');
+  _biomeBannerEl.style.cssText = [
+    'position:fixed','top:22px','left:50%','transform:translateX(-50%)',
+    'color:#fff','font:bold 18px/1 sans-serif',
+    'background:rgba(0,0,0,.7)','padding:8px 22px','border-radius:20px',
+    'z-index:20','opacity:0','transition:opacity 0.6s',
+    'pointer-events:none','text-align:center','letter-spacing:1px',
+  ].join(';');
+  document.body.appendChild(_biomeBannerEl);
   hpBarEl = document.getElementById('hp');
   starEl  = document.getElementById('stars');
 
@@ -3452,6 +3583,21 @@ const clock = new THREE.Clock();
 let elapsed = 0;
 
 let gameReady = false;
+let _lastBiomeLabel = ''; // para detectar cambio de bioma
+let _biomeLabelT    = 0;  // timer para ocultar el banner
+
+// Mapa bioma → nombre legible en español
+const BIOME_NAMES = {
+  home:'Aldea de Eryndell', tundra:'Tundra Helada', taiga:'Bosque de Taiga',
+  steppe:'Estepa Seca', plains:'Llanura Fría', tempforest:'Bosque Templado',
+  coldswamp:'Pantano Frío', drysavanna:'Sabana Seca', prairie:'Pradera',
+  mixedforest:'Bosque Mixto', jungle:'Jungla', mangrove:'Manglar',
+  desert:'Desierto', sahel:'Sahel', tropicalsavanna:'Sabana Tropical',
+  tropicalforest:'Selva Tropical', tropicalwetland:'Humedal Tropical',
+  hotdesert:'Gran Desierto', badlands:'Badlands', aridsavanna:'Sabana Árida',
+  rainforest:'Selva Lluviosa', archipelago:'Archipiélago', highlands:'Tierras Altas',
+  mountains:'Montañas', alpine:'Zona Alpina',
+};
 
 renderer.setAnimationLoop(() => {
   if (!gameReady) return;
@@ -3486,6 +3632,25 @@ renderer.setAnimationLoop(() => {
     updateDayNight(dt);
     updateRain(dt);
     updateCameraShake(dt);
+
+    // Bioma actual del jugador (usado por banner, niebla y partículas)
+    const _curBiome = _chunkBiome(
+      Math.floor(rig.position.x / (WORLD * TILE)),
+      Math.floor(rig.position.z / (WORLD * TILE))
+    );
+    updateWeatherParticles(dt, _curBiome);
+    if (_curBiome !== _lastBiomeLabel) {
+      _lastBiomeLabel = _curBiome;
+      _biomeLabelT = 3.5;
+      if (_biomeBannerEl) {
+        _biomeBannerEl.textContent = BIOME_NAMES[_curBiome] ?? _curBiome;
+        _biomeBannerEl.style.opacity = '1';
+      }
+    }
+    if (_biomeLabelT > 0) {
+      _biomeLabelT -= dt;
+      if (_biomeLabelT <= 0 && _biomeBannerEl) _biomeBannerEl.style.opacity = '0';
+    }
   }
   // Agua: solo uniforms (sin coste CPU)
   updateWater(elapsed);
@@ -4843,44 +5008,23 @@ function generateChunkData(cx, cz) {
     const humid = fbm(gx/80,  gz/80,  2, worldSeed+2002);
     const mW    = Math.max(0, Math.min(1, (elev-0.52)/0.22));
 
-    // ── Altura según bioma ──────────────────────────────────────────────
-    let h;
-    if (mW > 0.60) {                                         // Alpino / Volcánico
-      const vN = fbm(gx/12, gz/12, 5, worldSeed+4004);
-      h = 20 + elev*88 + vN*28;
-    } else if (mW > 0.35) {                                  // Montañas
-      h = 14 + elev*72 + rough*18;
-    } else if (mW > 0.15) {                                  // Tierras altas
-      h = 8 + elev*34 + rough*12;
-    } else if (temp < 0.22) {
-      h = humid<0.45 ? rough*6+fine*2                        // Tundra — muy plana
-                     : 4+rough*20+fine*5;                    // Taiga
-    } else if (temp < 0.42) {
-      if (humid<0.22) h = 2+rough*12+fine*4;                 // Estepa
-      else if (humid<0.50) h = rough*16+fine*5;              // Llanura fría
-      else if (humid<0.75) h = 4+rough*24+fine*7;            // Bosque templado
-      else h = rough*3+fine*1.5;                             // Pantano frío
-    } else if (temp < 0.62) {
-      if (humid<0.22) h = 2+rough*13+fine*5;                 // Sabana seca
-      else if (humid<0.48) h = rough*18+fine*6;              // Pradera
-      else if (humid<0.70) h = 6+rough*28+fine*8;            // Bosque mixto
-      else if (humid<0.85) h = 12+rough*36+fine*10;          // Selva templada
-      else h = rough*4+fine*2;                               // Manglar
-    } else if (temp < 0.82) {
-      if (humid<0.22) h = 5+rough*20+fine*8;                 // Desierto (dunas medianas)
-      else if (humid<0.40) h = 2+rough*14+fine*5;            // Sahel
-      else if (humid<0.60) h = rough*14+fine*5;              // Sabana tropical
-      else if (humid<0.80) h = 14+rough*38+fine*11;          // Selva tropical
-      else h = rough*5+fine*2;                               // Humedal tropical
-    } else {
-      if (humid<0.18) h = 6+rough*26+fine*10;                // Gran desierto (grandes dunas)
-      else if (humid<0.35) {                                 // Badlands (muy rugoso y erosionado)
-        const bN = fbm(gx/10, gz/10, 5, worldSeed+5005);
-        h = 6+bN*30+rough*10;
-      } else if (humid<0.55) h = 2+rough*14+fine*5;          // Sabana árida
-      else if (humid<0.75) h = 20+rough*42+fine*12;          // Selva densa
-      else h = rough*9+fine*3;                               // Archipiélago (islas bajas)
-    }
+    // ── Altura: fórmula continua global para evitar costuras entre chunks ──
+    // La altura sólo depende del ruido global (gx,gz) — jamás del bioma del chunk.
+    // mW va de 0 (llanura) a 1 (pico alpino) con interpolación suave.
+    const baseH = rough * 11 + fine * 3;                    // llanura 0-14m
+    const midH  = rough * 36 + fine * 9 + 3;               // colinas 3-48m
+    const vN    = mW > 0.35 ? fbm(gx/12, gz/12, 5, worldSeed+4004) : 0;
+    const peakH = elev * 82 + rough * 20 + vN * 26 + 8;    // pico 8-130m
+    const t1    = Math.max(0, Math.min(1, mW * 5));         // llanura→colinas
+    const t2    = Math.max(0, Math.min(1, (mW - 0.35) * 4));// colinas→cima
+    let h = baseH + (midH - baseH) * t1 + (peakH - midH) * t2;
+
+    // Modificadores por clima (finos, no abrupts)
+    if (temp < 0.22 && humid < 0.45) h *= 0.55;            // Tundra: aplanado
+    else if (biome === 'archipelago') h = fine * 6 + 0.5;  // Archipiélago: casi plano → agua
+    else if (biome === 'coldswamp' || biome === 'tropicalwetland') h = Math.min(h, 5);
+    else if (biome === 'mangrove') h = Math.min(h, 4);
+    else if ((temp > 0.62 && humid < 0.22) || biome === 'hotdesert') h += fine * 8; // dunas extra
 
     // ── Tipo de tile ─────────────────────────────────────────────────────
     const lakeN  = fbm(gx/32, gz/32, 2, worldSeed+888);
@@ -4902,17 +5046,30 @@ function generateChunkData(cx, cz) {
     else if (humid > 0.58 || (temp > 0.40 && humid > 0.42) || (temp < 0.40 && humid > 0.52)) t = T.FOREST;
     else t = T.GRASS;
 
+    // Archipiélago: océano profundo con islas de arena+hierba
+    if (biome === 'archipelago') {
+      const islandN = fbm(gx/14, gz/14, 3, worldSeed+6060);
+      if (islandN < 0.52) { t = T.DEEP; h = 0; }
+      else if (islandN < 0.58) { t = T.SAND; h = 0.5 + fine * 1.5; }
+      else { t = islandN > 0.72 ? T.FOREST : T.GRASS; h = 1 + (islandN-0.58) * 12; }
+    }
+
     map[z][x]  = t;
-    hmap[z][x] = (t===T.WATER) ? 0 : Math.max(0, h);
+    hmap[z][x] = (t===T.WATER || t===T.DEEP) ? 0 : Math.max(0, h);
+  }
+
+  // Stamp de castillos del mundo en este chunk
+  for (const wc of WORLD_CASTLES) {
+    if (cx === wc.cx && cz === wc.cz) _stampCastleOnMap(map, hmap, wc.tileCX, wc.tileCZ, wc.style);
   }
 
   // Gaussian blur (1 paso — preserva picos)
   const bl = hmap.map(r=>[...r]);
   for (let z=1;z<WORLD-1;z++) for (let x=1;x<WORLD-1;x++) {
-    if (map[z][x]===T.WATER) continue;
+    if (map[z][x]===T.WATER||map[z][x]===T.DEEP) continue;
     let sum=0,w=0;
     for (let dz=-1;dz<=1;dz++) for (let dx=-1;dx<=1;dx++) {
-      if (map[z+dz][x+dx]===T.WATER) continue;
+      if (map[z+dz][x+dx]===T.WATER||map[z+dz][x+dx]===T.DEEP) continue;
       const wt=(dz===0&&dx===0)?4:(dz===0||dx===0)?2:1;
       sum+=hmap[z+dz][x+dx]*wt; w+=wt;
     }
@@ -5044,19 +5201,24 @@ function buildChunkMesh(cx, cz) {
   _buildChunkTrees(cx, cz, chunk, offsetX, offsetZ);
   // Biome enemies
   spawnChunkEnemies(cx, cz);
+  // Castillos y aldeas del mundo infinito
+  _buildChunkCastle(cx, cz, chunk, offsetX, offsetZ);
+  _buildChunkVillage(cx, cz, chunk, offsetX, offsetZ);
 }
 
 function _buildChunkTrees(cx, cz, chunk, offsetX, offsetZ) {
   // Chunk 0,0 ya tiene árboles colocados en buildScene — evitar duplicados
   if (cx === 0 && cz === 0) return;
 
-  const forestList=[], grassList=[], snowList=[], cactusList=[];
+  const forestList=[], grassList=[], snowList=[], cactusList=[], palmList=[];
+  const PALM_BIOMES = new Set(['archipelago','mangrove','tropicalwetland','tropicalsavanna','aridsavanna']);
+  const isPalmBiome = PALM_BIOMES.has(chunk.biome);
   const offs = [[0.15,0.15],[0.6,0.2],[0.25,0.65],[-0.1,0.45]];
   for (let z=0;z<WORLD;z++) for (let x=0;x<WORLD;x++) {
     const t  = chunk.map[z][x];
     const h  = chunk.hmap[z][x];
     const gx = cx*WORLD+x, gz = cz*WORLD+z;
-    if (t === T.FOREST) {
+    if (t === T.FOREST && !isPalmBiome) {
       for (let ti=0;ti<4;ti++)
         if (hash(gx*3+ti*13,gz*3+ti*17,worldSeed+33+ti*7)>0.12)
           forestList.push([x+offs[ti][0], z+offs[ti][1]]);
@@ -5065,11 +5227,14 @@ function _buildChunkTrees(cx, cz, chunk, offsetX, offsetZ) {
       for (let ti=0;ti<2;ti++)
         if (hash(gx*3+ti*13,gz*3+ti*17,worldSeed+77+ti*7)>0.22)
           snowList.push([x+offs[ti][0], z+offs[ti][1]]);
-    } else if (t === T.GRASS && hash(gx,gz,worldSeed+44)>0.60) {
+    } else if (t === T.GRASS && !isPalmBiome && hash(gx,gz,worldSeed+44)>0.60) {
       grassList.push([x+0.5, z+0.5]);
-    } else if (t === T.SAND && hash(gx,gz,worldSeed+88)>0.83) {
+    } else if (t === T.SAND && !isPalmBiome && hash(gx,gz,worldSeed+88)>0.83) {
       // Cactus en desierto (poco densos)
       cactusList.push([x+0.5, z+0.5]);
+    } else if ((t === T.SAND || t === T.GRASS || t === T.FOREST) && isPalmBiome && hash(gx,gz,worldSeed+99)>0.82) {
+      // Palmeras en playas tropicales e islas
+      palmList.push([x+0.5, z+0.5]);
     }
   }
 
@@ -5079,6 +5244,7 @@ function _buildChunkTrees(cx, cz, chunk, offsetX, offsetZ) {
     [grassList,  1, 2.5, 2.0],
     [snowList,   2, 3.0, 3.0],
     [cactusList, 3, 1.4, 1.0],
+    [palmList,   4, 2.2, 1.5],
   ];
   for (const [list, mi, scBase, scRange] of groups) {
     if (!list.length || !treePartsList[mi]) continue;
@@ -5437,6 +5603,7 @@ async function initGame() {
   spawnBridge();
   buildMinimap();
   buildHUD();
+  _initWeatherParticles();
   updateStarCounter();
   updateQuestHUD();
 
@@ -5654,6 +5821,225 @@ function _buildTreeParts(seed, sizeClass = 1) {
   }
   const canopyGeo = mergeGeometries(coneParts);
   return [{ geo: trunkGeo, mat: trunkMat }, { geo: canopyGeo, mat: leafMat }];
+}
+
+// ─────────────────────────────────────────────────────────────
+// PALMERAS — low-poly para biomas de playa y trópico
+// ─────────────────────────────────────────────────────────────
+function _buildPalmParts(seed) {
+  const parts = [];
+  const trunkM = new THREE.MeshLambertMaterial({ color: 0x8B6914 });
+  const trunkGeo = new THREE.CylinderGeometry(0.18, 0.24, 3.5, 7);
+  parts.push({ geo: trunkGeo, mat: trunkM, py: 1.75, rx: 0, ry: 0, rz: 0.10 });
+  const leafM = new THREE.MeshLambertMaterial({ color: 0x2d8a1e, side: THREE.DoubleSide });
+  for (let i = 0; i < 5; i++) {
+    const angle = (i / 5) * Math.PI * 2;
+    const leafGeo = new THREE.ConeGeometry(0.25, 2.2, 4);
+    parts.push({
+      geo: leafGeo, mat: leafM,
+      px: Math.cos(angle) * 0.8, py: 3.6, pz: Math.sin(angle) * 0.8,
+      rx: -0.85, ry: angle, rz: 0
+    });
+  }
+  const coconutM = new THREE.MeshLambertMaterial({ color: 0x5c3d0e });
+  for (let i = 0; i < 3; i++) {
+    const ca = (i / 3) * Math.PI * 2 + 0.5;
+    parts.push({ geo: new THREE.SphereGeometry(0.15, 5, 4), mat: coconutM,
+      px: Math.cos(ca) * 0.35, py: 3.4, pz: Math.sin(ca) * 0.35 });
+  }
+  // Convertir a formato {geo, mat} fusionando geometrías por material
+  // (treePartsList espera array de {geo,mat})
+  // Tronco
+  const trunkG = new THREE.CylinderGeometry(0.18, 0.24, 3.5, 7);
+  trunkG.translate(0, 1.75, 0);
+  const leafParts = [];
+  for (let i = 0; i < 5; i++) {
+    const angle = (i / 5) * Math.PI * 2;
+    const lg = new THREE.ConeGeometry(0.25, 2.2, 4);
+    lg.rotateX(-0.85); lg.rotateY(angle);
+    lg.translate(Math.cos(angle) * 0.8, 3.6, Math.sin(angle) * 0.8);
+    leafParts.push(lg);
+  }
+  const coconutParts = [];
+  for (let i = 0; i < 3; i++) {
+    const ca = (i / 3) * Math.PI * 2 + 0.5 + seed * 0.1;
+    const cg = new THREE.SphereGeometry(0.15, 5, 4);
+    cg.translate(Math.cos(ca) * 0.35, 3.4, Math.sin(ca) * 0.35);
+    coconutParts.push(cg);
+  }
+  return [
+    { geo: trunkG, mat: new THREE.MeshLambertMaterial({ color: 0x8B6914 }) },
+    { geo: mergeGeometries(leafParts), mat: new THREE.MeshLambertMaterial({ color: 0x2d8a1e, side: THREE.DoubleSide }) },
+    { geo: mergeGeometries(coconutParts), mat: new THREE.MeshLambertMaterial({ color: 0x5c3d0e }) },
+  ];
+}
+
+// ─────────────────────────────────────────────────────────────
+// CASTILLOS DEL MUNDO — stamp en chunks lejanos
+// ─────────────────────────────────────────────────────────────
+function _stampCastleOnMap(map, hmap, tcx, tcz, style) {
+  const flatH = style === 'ice' ? 18 : 12;
+  const W = 14, H = 8;
+  const x0 = Math.max(0, tcx - Math.floor(W/2));
+  const z0 = Math.max(0, tcz - Math.floor(H/2));
+  const x1 = Math.min(WORLD-1, x0 + W);
+  const z1 = Math.min(WORLD-1, z0 + H);
+  for (let z = z0; z < z1; z++) {
+    for (let x = x0; x < x1; x++) {
+      const isWall = z === z0 || z === z1-1 || x === x0 || x === x1-1;
+      map[z][x]  = isWall ? T.DWALL : T.DFLOOR;
+      hmap[z][x] = flatH;
+    }
+  }
+  // Gate (south center)
+  const gx = x0 + Math.floor(W/2);
+  if (z1-1 < WORLD) { map[z1-1][gx] = T.PATH; map[z1-1][gx+1] = T.PATH; }
+}
+
+function _buildChunkCastle(cx, cz, chunk, offsetX, offsetZ) {
+  for (const wc of WORLD_CASTLES) {
+    if (cx !== wc.cx || cz !== wc.cz) continue;
+    const color = wc.style === 'ice' ? 0xaacce0 : 0xe8c870;
+    const castMat = new THREE.MeshLambertMaterial({ color, flatShading: true });
+    const WLAYERS = 5, ROCKS_PER_ROW = 3;
+    const ROCK_XZ = 0.68, ROCK_Y = 1.02;
+    const WSCALE  = TILE / (ROCKS_PER_ROW * ROCK_XZ);
+    const LAYER_H = ROCK_Y * WSCALE;
+    const flatH   = wc.style === 'ice' ? 18 : 12;
+
+    const dwalls = [], dfloors = [];
+    for (let z = 0; z < WORLD; z++) for (let x = 0; x < WORLD; x++) {
+      if (chunk.map[z][x] === T.DWALL)  dwalls.push([x,z]);
+      if (chunk.map[z][x] === T.DFLOOR) dfloors.push([x,z]);
+    }
+
+    if (dwalls.length) {
+      const totalInst = dwalls.length * WLAYERS * ROCKS_PER_ROW;
+      const wIM = new THREE.InstancedMesh(rockGeo, castMat, totalInst);
+      wIM.castShadow = wIM.receiveShadow = true;
+      let wi = 0;
+      const wd = new THREE.Object3D();
+      dwalls.forEach(([x,z]) => {
+        const wx = offsetX + x*TILE + TILE/2, wz = offsetZ + z*TILE + TILE/2;
+        for (let ly = 0; ly < WLAYERS; ly++) {
+          const brickOff = (ly&1) ? TILE/6 : 0;
+          for (let ri = 0; ri < ROCKS_PER_ROW; ri++) {
+            const step = (ri-1)*(TILE/3) + brickOff;
+            wd.position.set(wx+step, flatH + LAYER_H*ly, wz);
+            wd.rotation.set(0, hash(x+ri,z+ly,worldSeed+60)*0.3, 0);
+            wd.scale.set(WSCALE, WSCALE, WSCALE);
+            wd.updateMatrix(); wIM.setMatrixAt(wi++, wd.matrix);
+          }
+        }
+      });
+      wIM.instanceMatrix.needsUpdate = true; scene.add(wIM);
+    }
+
+    if (dfloors.length) {
+      const FSCALE_XZ = (TILE*0.97)/0.68;
+      const fIM = new THREE.InstancedMesh(rockGeo, castMat, dfloors.length);
+      fIM.receiveShadow = true;
+      const fd = new THREE.Object3D();
+      dfloors.forEach(([x,z],i) => {
+        fd.position.set(offsetX+x*TILE+TILE/2, flatH, offsetZ+z*TILE+TILE/2);
+        fd.rotation.set(0,0,0); fd.scale.set(FSCALE_XZ, 0.14, FSCALE_XZ);
+        fd.updateMatrix(); fIM.setMatrixAt(i, fd.matrix);
+      });
+      fIM.instanceMatrix.needsUpdate = true; scene.add(fIM);
+    }
+
+    // Boss slime en el centro del castillo
+    const bx = offsetX + wc.tileCX*TILE + TILE/2;
+    const bz = offsetZ + wc.tileCZ*TILE + TILE/2;
+    const bossMat2 = new THREE.MeshLambertMaterial({ color: wc.bossColor, flatShading: true });
+    const bg = new THREE.Group();
+    const SC = 10;
+    const bb = new THREE.Mesh(new THREE.SphereGeometry(0.42*SC, 10, 7), bossMat2);
+    bb.scale.y = 0.65; bb.position.y = 0.3*SC; bg.add(bb);
+    bg.position.set(bx, flatH + 1.5, bz);
+    scene.add(bg);
+    const bossFixedY = flatH + 1.5;
+    const h = hash(bx*0.01, bz*0.01, worldSeed+42);
+    enemies.push({
+      mesh: bg, hp: 15, hitCooldown:0, dead:false, deathT:0,
+      spawnX:bx, spawnZ:bz, aggroed:false,
+      aggroRange:40, chaseSpeed:3.5, lungeRange:8,
+      lungeSpeed:12, hitRange:7, swordHitRange:7,
+      vx:0,vz:0,squashT:0,hitFlashT:0,
+      patrolTarget:null,patrolPause:2,patrolStep:0,
+      lungePhase:'cooldown',lungeT:h*1.2,
+      lungeDir:new THREE.Vector3(),lungeDamaged:false,
+      phase:h*Math.PI*2,
+      fixedY:bossFixedY,
+      _bossMat:bossMat2,_bossBody:bb,_bossScale:SC,
+      _dmgMat:bossMat2,
+    });
+  }
+}
+
+function _buildChunkVillage(cx, cz, chunk, offsetX, offsetZ) {
+  for (const wv of WORLD_VILLAGES) {
+    if (cx !== wv.cx || cz !== wv.cz) continue;
+    const VCX = offsetX + wv.tileCX * TILE + TILE/2;
+    const VCZ = offsetZ + wv.tileCZ * TILE + TILE/2;
+
+    // Fuente simple
+    const fy = groundAt(VCX, VCZ);
+    const stoneMat2 = new THREE.MeshLambertMaterial({ color: 0x999999, flatShading:true });
+    const waterMat2 = new THREE.MeshLambertMaterial({ color: 0x29b6e8, emissive:0x0055aa, emissiveIntensity:0.4 });
+    const fb = new THREE.Mesh(new THREE.CylinderGeometry(2.0, 2.2, 0.5, 12), stoneMat2);
+    fb.position.set(VCX, fy+0.25, VCZ); scene.add(fb);
+    const fw = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.6, 0.28, 12), waterMat2);
+    fw.position.set(VCX, fy+0.62, VCZ); scene.add(fw);
+    const fc = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.22, 1.2, 7), stoneMat2);
+    fc.position.set(VCX, fy+1.1, VCZ); scene.add(fc);
+
+    // Fogata (campfire) en el centro
+    const fireY = fy + 0.5;
+    const logMat = new THREE.MeshLambertMaterial({ color: 0x5a3010 });
+    const flameMat2 = new THREE.MeshLambertMaterial({ color: 0xff6600, emissive: 0xff3300, emissiveIntensity:1.2 });
+    for (let i = 0; i < 3; i++) {
+      const la = (i/3)*Math.PI*2;
+      const log = new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.09,0.6,5), logMat);
+      log.position.set(VCX+Math.cos(la)*0.28, fireY, VCZ+Math.sin(la)*0.28);
+      log.rotation.z = 0.7; log.rotation.y = la; scene.add(log);
+    }
+    const flame = new THREE.Mesh(new THREE.ConeGeometry(0.18,0.55,6), flameMat2);
+    flame.position.set(VCX, fireY+0.35, VCZ); scene.add(flame);
+    // Luz de fogata
+    const fireLight = new THREE.PointLight(0xff6600, 1.2, 12);
+    fireLight.position.set(VCX, fireY+0.6, VCZ); scene.add(fireLight);
+
+    // NPCs de la aldea
+    const eyeWM = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    const eyePM = new THREE.MeshLambertMaterial({ color: 0x111111 });
+    for (const nd of wv.npcs) {
+      const wx = offsetX + nd.tx * TILE + TILE/2;
+      const wz = offsetZ + nd.tz * TILE + TILE/2;
+      const gy = groundAt(wx, wz);
+      const S = EYE / 1.51;
+      const ng = new THREE.Group();
+      const bm = new THREE.MeshLambertMaterial({ color: nd.color });
+      const body2 = new THREE.Mesh(new THREE.BoxGeometry(0.5,0.7,0.3), bm);
+      body2.position.y = 0.85; ng.add(body2);
+      const head2 = new THREE.Mesh(new THREE.SphereGeometry(0.28,7,5), bm);
+      head2.position.y = 1.48; ng.add(head2);
+      for (const ox of [-0.11,0.11]) {
+        const sc2 = new THREE.Mesh(new THREE.SphereGeometry(0.07,5,4), eyeWM);
+        sc2.position.set(ox,1.51,0.22); ng.add(sc2);
+        const pu2 = new THREE.Mesh(new THREE.SphereGeometry(0.042,4,3), eyePM);
+        pu2.position.set(ox,1.51,0.27); ng.add(pu2);
+      }
+      const indG2 = new THREE.Mesh(
+        new THREE.SphereGeometry(0.12,5,4),
+        new THREE.MeshBasicMaterial({color:0xffff00})
+      );
+      indG2.position.y = 2.1; ng.add(indG2);
+      ng.position.set(wx, gy, wz); ng.scale.setScalar(S); scene.add(ng);
+      npcs.push({ mesh:ng, indicator:indG2, body:body2, wx, wz,
+                  questId:nd.questId, name:nd.name, bobPhase:Math.random()*Math.PI*2 });
+    }
+  }
 }
 
 initGame().catch(console.error);
