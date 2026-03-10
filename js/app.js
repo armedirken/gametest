@@ -2627,55 +2627,56 @@ const MM_PALETTE = {
   [T.PATH]:   [176,128,  96],
 };
 
-function buildMinimap() {
-  const ctx = mmBuf.getContext('2d');
-  const id  = ctx.createImageData(WORLD, WORLD);
-  for (let z = 0; z < WORLD; z++) {
-    for (let x = 0; x < WORLD; x++) {
-      const [r, g, b] = MM_PALETTE[worldMap[z][x]] || [0,0,0];
-      const i = (z * WORLD + x) * 4;
-      id.data[i] = r; id.data[i+1] = g; id.data[i+2] = b; id.data[i+3] = 255;
+function buildMinimap() { /* no-op — ahora drawMinimap lee chunkMap en tiempo real */ }
+
+function drawMinimap() {
+  const MM   = WORLD;       // 64px
+  const HALF = MM >> 1;     // 32 — jugador siempre en el centro
+
+  // Tile donde está el jugador
+  const ptx = Math.floor(rig.position.x / TILE);
+  const ptz = Math.floor(rig.position.z / TILE);
+
+  // Reconstruir imagen desde chunkMap centrada en el jugador
+  const ctx = mmDisp.getContext('2d');
+  const id  = ctx.createImageData(MM, MM);
+  for (let dz = 0; dz < MM; dz++) {
+    for (let dx = 0; dx < MM; dx++) {
+      const gtx = ptx - HALF + dx;
+      const gtz = ptz - HALF + dz;
+      const cx  = Math.floor(gtx / WORLD);
+      const cz  = Math.floor(gtz / WORLD);
+      const lx  = ((gtx % WORLD) + WORLD) % WORLD;
+      const lz  = ((gtz % WORLD) + WORLD) % WORLD;
+      const ch  = chunkMap.get(`${cx},${cz}`);
+      const t   = ch ? (ch.map[lz]?.[lx] ?? T.GRASS) : -1;
+      const [r, g, b] = t < 0 ? [15,15,15] : (MM_PALETTE[t] || [80,80,80]);
+      const i = (dz * MM + dx) * 4;
+      id.data[i]=r; id.data[i+1]=g; id.data[i+2]=b; id.data[i+3]=255;
     }
   }
   ctx.putImageData(id, 0, 0);
-}
 
-function drawMinimap() {
-  const ctx = mmDisp.getContext('2d');
-  const px = rig.position.x / (WORLD * TILE) * WORLD;
-  const pz = rig.position.z / (WORLD * TILE) * WORLD;
-
-  // Minimap zoom (mejora #17)
-  if (minimapZoom === 1) {
-    ctx.drawImage(mmBuf, 0, 0);
-  } else {
-    // Zoom out: escalar el mapa para mostrar más area
-    ctx.clearRect(0, 0, WORLD, WORLD);
-    ctx.drawImage(mmBuf, 0, 0, WORLD, WORLD, -WORLD / 2, -WORLD / 2, WORLD * 2, WORLD * 2);
-  }
-
-  // NPC markers (mejora #10)
+  // Marcadores NPC (solo los visibles en el área)
   ctx.fillStyle = '#ffff00';
   for (const n of npcs) {
-    const nx = n.wx / (WORLD * TILE) * WORLD;
-    const nz = (n.wz - 3.2) / (WORLD * TILE) * WORLD; // offset de la posición frente a la puerta
-    ctx.beginPath();
-    ctx.arc(nx, nz, 1.8, 0, Math.PI * 2);
-    ctx.fill();
+    const nx = Math.floor(n.wx / TILE) - ptx + HALF;
+    const nz = Math.floor(n.wz / TILE) - ptz + HALF;
+    if (nx >= 0 && nx < MM && nz >= 0 && nz < MM) {
+      ctx.beginPath(); ctx.arc(nx, nz, 1.8, 0, Math.PI*2); ctx.fill();
+    }
   }
 
-  // Player dot
+  // Jugador — punto rojo en el centro
   ctx.fillStyle = '#ff3333';
-  ctx.fillRect(px - 1.5, pz - 1.5, 3, 3);
+  ctx.fillRect(HALF - 1.5, HALF - 1.5, 3, 3);
+
   if (mmTex3d) mmTex3d.needsUpdate = true;
 
-  // Actualizar barra de coordenadas y brújula
-  const tileX = Math.floor(rig.position.x / TILE);
-  const tileZ = Math.floor(rig.position.z / TILE);
+  // Barra de coordenadas y brújula
   const _DIRS = ['N','NO','O','SO','S','SE','E','NE'];
-  const _yawNorm = ((yaw % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
-  const _dir = _DIRS[Math.round(_yawNorm / (Math.PI / 4)) % 8];
-  mmInfoEl.textContent = `X:${tileX} Z:${tileZ}  ${_dir}`;
+  const _yawNorm = ((yaw % (Math.PI*2)) + Math.PI*2) % (Math.PI*2);
+  mmInfoEl.textContent = `X:${ptx} Z:${ptz}  ${_DIRS[Math.round(_yawNorm/(Math.PI/4))%8]}`;
 }
 
 // ─────────────────────────────────────────────────────────────
