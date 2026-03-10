@@ -1767,7 +1767,10 @@ function updateEnemies(dt) {
     if (e.dead) {
       e.deathT += dt;
       e.mesh.scale.setScalar(Math.max(0, 1 - e.deathT / 0.35));
-      if (e.deathT > 0.4) scene.remove(e.mesh);
+      if (e.deathT > 0.4) {
+        scene.remove(e.mesh);
+        if (e.bossRBody && rapierWorld) { rapierWorld.removeRigidBody(e.bossRBody); e.bossRBody = null; }
+      }
       continue;
     }
 
@@ -1947,6 +1950,15 @@ function updateEnemies(dt) {
           e.patrolPause = 1.0 + hash(e.patrolStep, e.spawnX, e.spawnZ) * 1.5;
         }
       }
+    }
+
+    // ── Actualizar colisionador cinemático del boss ─────────────
+    if (e.bossRBody && rapierWorld) {
+      e.bossRBody.setNextKinematicTranslation({
+        x: e.mesh.position.x,
+        y: e.mesh.position.y,
+        z: e.mesh.position.z,
+      });
     }
 
     // ── Sword hit ──────────────────────────────────────────────
@@ -3503,13 +3515,18 @@ function spawnBossSlime() {
   g.position.set(bx, bossFloorY, bz);
   scene.add(g);
 
-  // Colisionador estático para que el jugador no lo traspase
+  // Colisionador cinemático — sigue al boss cada frame (igual que el del jugador)
+  let bossRBody = null;
   if (rapierWorld) {
     const bodyR = 0.42 * SC;
     const bodyH = bodyR * 0.65;
+    const rbDesc = RAPIER.RigidBodyDesc.kinematicPositionBased()
+      .setTranslation(bx, bossFloorY, bz);
+    bossRBody = rapierWorld.createRigidBody(rbDesc);
     rapierWorld.createCollider(
-      RAPIER.ColliderDesc.capsule(bodyH * 0.3, bodyR * 0.85)
-        .setTranslation(bx, bossFloorY + 0.3 * SC + bodyH * 0.3, bz)
+      RAPIER.ColliderDesc.cylinder(bodyH, bodyR * 0.82)
+        .setTranslation(0, 0.3 * SC, 0),  // centrado en el cuerpo (offset local)
+      bossRBody
     );
   }
 
@@ -3529,6 +3546,7 @@ function spawnBossSlime() {
     chaseSpeed: 4.5,       // m/s persecución
     lungeSpeed: 16.0,      // m/s durante el lunge
     _bossMat: bossMat, _bossBody: body, _bossScale: SC,
+    bossRBody,           // kinematic Rapier body — se actualiza cada frame
   });
 }
 
